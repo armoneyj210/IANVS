@@ -3,6 +3,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from janus_etl.config import get_settings
+from janus_etl.dataset_descriptor import (
+    load_dataset_descriptor,
+)
+from janus_etl.dataset_registry import register_dataset
 from janus_etl.db import health_check
 from janus_etl.manifest import write_manifest
 
@@ -31,6 +35,17 @@ def build_parser() -> argparse.ArgumentParser:
         "directory",
         type=Path,
         help="Raw dataset directory",
+    )
+
+    register_parser = subparsers.add_parser(
+        "register-dataset",
+        help="Register a governed dataset release",
+    )
+
+    register_parser.add_argument(
+        "descriptor",
+        type=Path,
+        help="Path to Janus dataset descriptor JSON",
     )
 
     return parser
@@ -64,6 +79,27 @@ def run_manifest(directory: Path) -> None:
     print(f"Manifest SHA256: {manifest_digest}")
 
 
+def run_register_dataset(
+    descriptor_path: Path,
+) -> None:
+    settings = get_settings()
+
+    descriptor = load_dataset_descriptor(descriptor_path)
+
+    result = register_dataset(
+        settings,
+        descriptor,
+    )
+
+    print("JANUS DATASET REGISTRATION")
+    print("--------------------------")
+    print(f"Dataset ID:         {result['dataset_id']}")
+    print(f"Dataset Release ID: {result['dataset_release_id']}")
+    print(f"Files Registered:   {result['file_count']}")
+    print(f"Manifest SHA256:    {result['manifest_sha256']}")
+    print(f"System Event:       {result['system_event_id']}")
+
+
 def main(
     argv: Sequence[str] | None = None,
 ) -> None:
@@ -78,6 +114,10 @@ def main(
 
     if args.command == "manifest":
         run_manifest(args.directory)
+        return
+
+    if args.command == "register-dataset":
+        run_register_dataset(args.descriptor)
         return
 
     parser.error(f"Unsupported command: {args.command}")
