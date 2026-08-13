@@ -23,3 +23,6 @@ Flyway migrate:
 docker compose --profile tools run --rm flyway migrate
 Flyway validate:
 docker compose --profile tools run --rm flyway validate 
+
+Ruff check and fix:
+uv run ruff check . --fix
