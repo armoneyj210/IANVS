@@ -22,7 +22,6 @@ def open_connection(settings: Settings):
 
 def health_check(settings: Settings) -> dict[str, Any]:
     with open_connection(settings) as conn, conn.cursor() as cursor:
-
         # Set Janus environment for this DB session.
         cursor.execute(
             """
