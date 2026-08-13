@@ -117,3 +117,8 @@ Desktop.ini
 # ------------------------------------------------------------
 docker-compose.override.yml
 compose.override.yml
+
+# ------------------------------------------------------------
+# External source repositories / generators
+# ------------------------------------------------------------
+external/

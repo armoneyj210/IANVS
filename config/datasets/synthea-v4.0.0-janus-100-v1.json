@@ -1,0 +1,48 @@
+{
+  "descriptor_schema_version": 1,
+
+  "raw_directory": "data/raw/synthea/synthea-v4.0.0-seed-20260813-pop100-v1",
+
+  "source_system": {
+    "name": "Synthea",
+    "source_type": "synthetic_generator",
+    "description": "Open-source synthetic patient population generator.",
+    "base_uri": "https://github.com/synthetichealth/synthea"
+  },
+
+  "dataset": {
+    "name": "Janus Synthea Synthetic Patient Cohort",
+    "description": "Deterministically generated synthetic longitudinal patient cohort for Janus development and testing.",
+    "homepage_uri": "https://synthetichealth.github.io/synthea/",
+    "license_name": "Apache License 2.0",
+    "license_uri": "https://www.apache.org/licenses/LICENSE-2.0",
+    "usage_notes": "Synthetic development/test data only. Do not treat as clinically representative or as evidence of therapeutic effectiveness.",
+    "data_classification": "synthetic",
+    "contains_phi": false,
+    "review_status": "candidate"
+  },
+
+  "release": {
+    "release_label": "synthea-v4.0.0-seed-20260813-pop100-v1",
+    "source_version": "4.0.0",
+    "source_commit_sha": "0185c09",
+    "acquisition_method": "generated",
+    "source_uri": "https://github.com/synthetichealth/synthea/tree/v4.0.0",
+
+    "generation_parameters": {
+      "seed": 20260813,
+      "clinician_seed": 20260814,
+      "population": 100,
+      "reference_date": "20260813",
+      "state": "Massachusetts",
+      "csv_export": true,
+      "fhir_export": false,
+      "ccda_export": false
+    },
+
+    "release_metadata": {
+      "purpose": "Janus development and ETL validation",
+      "initial_vertical_slice": "Adult depression / CBT / PHQ-9 / 8-week horizon"
+    }
+  }
+}
