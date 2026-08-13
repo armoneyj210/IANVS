@@ -26,7 +26,7 @@ services:
       retries: 10
 
   flyway:
-      image: redgate/flyway:13.2.0
+      image: redgate/flyway:13.3.0
       profiles:
         - tools
 

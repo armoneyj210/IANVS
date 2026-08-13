@@ -207,7 +207,22 @@ ALTER SCHEMA clinical OWNER TO janus_owner;
 ALTER SCHEMA twin OWNER TO janus_owner;
 ALTER SCHEMA simulation OWNER TO janus_owner;
 ALTER SCHEMA ops OWNER TO janus_owner;
+-- ============================================================
+-- FLYWAY METADATA OWNERSHIP / ACCESS
+-- ============================================================
 
+ALTER SCHEMA janus_meta OWNER TO janus_owner;
+
+GRANT USAGE, CREATE
+ON SCHEMA janus_meta
+TO janus_migrator_svc;
+
+ALTER TABLE janus_meta.flyway_schema_history
+OWNER TO janus_owner;
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+ON TABLE janus_meta.flyway_schema_history
+TO janus_migrator_svc;
 
 -- ============================================================
 -- 6. EXISTING CLINICAL OBJECT OWNERSHIP
