@@ -1,5 +1,5 @@
 Look inside Janus/Verify Migration:
-docker exec -it therapy-postgres psql -U therapy_app -d therapy
+docker exec -it therapy-postgres psql -U janus_migrator_svc -d therapy
 Restart container:
 docker start therapy-postgres
 Show Schemas:

@@ -25,5 +25,29 @@ services:
       timeout: 5s
       retries: 10
 
+  flyway:
+      image: redgate/flyway:13.2.0
+      profiles:
+        - tools
+
+      environment:
+        FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+        FLYWAY_USER: ${JANUS_MIGRATOR_DB_USER}
+        FLYWAY_PASSWORD: ${JANUS_MIGRATOR_DB_PASSWORD}
+
+        FLYWAY_LOCATIONS: filesystem:/flyway/sql
+        FLYWAY_DEFAULT_SCHEMA: janus_meta
+
+        FLYWAY_CONNECT_RETRIES: 60
+        FLYWAY_VALIDATE_MIGRATION_NAMING: "true"
+        FLYWAY_CLEAN_DISABLED: "true"
+
+      volumes:
+        - ./db/migrations:/flyway/sql:ro
+
+      depends_on:
+        postgres:
+          condition: service_healthy
+
 volumes:
   therapy_postgres_data:
