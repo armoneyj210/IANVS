@@ -1,0 +1,18 @@
+Look inside Janus/Verify Migration:
+docker exec -it therapy-postgres psql -U therapy_app -d therapy
+Restart container:
+docker start therapy-postgres
+Show Schemas:
+\dn
+Show Tables:
+\dt
+Show Tables inside:
+\dt clinical.*
+\dt ingest.*
+Describe a particular Table:
+\d clinical.table-name
+\d ingest.record_lineage
+Exit:
+\q
+Run Migrations:
+Get-Content .\db\migrations\'###_migration_file_name.sql' | docker exec -i therapy-postgres psql -v ON_ERROR_STOP=1 -U therapy_app -d therapy

@@ -1,0 +1,29 @@
+services:
+
+  postgres:
+    image: postgres:18.4
+    container_name: therapy-postgres
+
+    environment:
+      POSTGRES_DB: therapy
+      POSTGRES_USER: therapy_app
+      POSTGRES_PASSWORD: local_dev_only
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - therapy_postgres_data:/var/lib/postgresql
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U therapy_app -d therapy"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  therapy_postgres_data:
