@@ -9,6 +9,7 @@ from janus_etl.dataset_descriptor import (
 from janus_etl.dataset_registry import register_dataset
 from janus_etl.db import health_check
 from janus_etl.manifest import write_manifest
+from janus_etl.import_runtime import import_release
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +41,20 @@ def build_parser() -> argparse.ArgumentParser:
     register_parser = subparsers.add_parser(
         "register-dataset",
         help="Register a governed dataset release",
+    )
+
+    import_parser = subparsers.add_parser(
+        "import-release",
+        help=(
+            "Import a governed registered dataset "
+            "release into the ingest layer"
+        ),
+    )
+
+    import_parser.add_argument(
+        "descriptor",
+        type=Path,
+        help="Path to Janus dataset descriptor JSON",
     )
 
     register_parser.add_argument(
@@ -99,6 +114,62 @@ def run_register_dataset(
     print(f"Manifest SHA256:    {result['manifest_sha256']}")
     print(f"System Event:       {result['system_event_id']}")
 
+def run_import_release(
+    descriptor_path: Path,
+) -> None:
+    settings = get_settings()
+
+    descriptor = load_dataset_descriptor(
+        descriptor_path
+    )
+
+    print("JANUS GOVERNED DATASET IMPORT")
+    print("-----------------------------")
+    print(f"Environment: {settings.janus_env}")
+    print(
+        f"Release:     "
+        f"{descriptor.release.release_label}"
+    )
+    print()
+
+    result = import_release(
+        settings,
+        descriptor,
+    )
+
+    print("Import completed.")
+    print(
+        f"Import Batch ID:  "
+        f"{result['import_batch_id']}"
+    )
+    print(
+        f"Dataset Release:  "
+        f"{result['dataset_release_id']}"
+    )
+    print(
+        f"Files Imported:   "
+        f"{result['file_count']}"
+    )
+    print(
+        f"Records Seen:     "
+        f"{result['records_seen']}"
+    )
+    print(
+        f"Records Accepted: "
+        f"{result['records_accepted']}"
+    )
+    print(
+        f"Records Rejected: "
+        f"{result['records_rejected']}"
+    )
+    print(
+        f"Manifest SHA256:  "
+        f"{result['manifest_sha256']}"
+    )
+    print(
+        f"System Event:     "
+        f"{result['system_event_id']}"
+    )
 
 def main(
     argv: Sequence[str] | None = None,
@@ -118,6 +189,10 @@ def main(
 
     if args.command == "register-dataset":
         run_register_dataset(args.descriptor)
+        return
+
+    if args.command == "import-release":
+        run_import_release(args.descriptor)
         return
 
     parser.error(f"Unsupported command: {args.command}")
