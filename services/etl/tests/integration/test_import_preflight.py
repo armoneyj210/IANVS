@@ -105,23 +105,23 @@ def test_registered_synthea_release_preflight() -> None:
     assert (
     result["verified_artifact_count"]
     == EXPECTED_FILE_COUNT
-)
+    )
 
     assert (
         result["importable_file_count"]
         == EXPECTED_IMPORTABLE_FILE_COUNT
     )
-    
+
     assert (
         result["non_tabular_file_count"]
         == EXPECTED_NON_TABULAR_FILE_COUNT
     )
-    
+
     assert (
         len(result["importable_source_files"])
         == EXPECTED_IMPORTABLE_FILE_COUNT
     )
-    
+
     assert (
         len(result["verified_non_tabular_files"])
         == EXPECTED_NON_TABULAR_FILE_COUNT
