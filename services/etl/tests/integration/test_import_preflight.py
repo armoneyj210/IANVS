@@ -9,7 +9,6 @@ from janus_etl.dataset_descriptor import (
 )
 from janus_etl.import_runtime import preflight_release
 
-
 RUN_INTEGRATION_TESTS = (
     os.getenv("JANUS_RUN_INTEGRATION_TESTS") == "1"
 )

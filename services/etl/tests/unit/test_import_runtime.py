@@ -75,4 +75,4 @@ def test_canonical_row_payload_preserves_unicode() -> None:
 
     payload = _canonical_row_payload(row)
 
-    assert "café".encode("utf-8") in payload
+    assert "café".encode() in payload

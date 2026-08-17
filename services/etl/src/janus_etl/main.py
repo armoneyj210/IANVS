@@ -1,6 +1,7 @@
 import argparse
 from collections.abc import Sequence
 from pathlib import Path
+from uuid import UUID
 
 from janus_etl.config import get_settings
 from janus_etl.dataset_descriptor import (
@@ -8,8 +9,9 @@ from janus_etl.dataset_descriptor import (
 )
 from janus_etl.dataset_registry import register_dataset
 from janus_etl.db import health_check
-from janus_etl.manifest import write_manifest
 from janus_etl.import_runtime import import_release
+from janus_etl.manifest import write_manifest
+from janus_etl.quality_runtime import quality_run
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,7 +52,26 @@ def build_parser() -> argparse.ArgumentParser:
             "release into the ingest layer"
         ),
     )
+    quality_parser = subparsers.add_parser(
+        "quality-run",
+        help=(
+            "Execute the governed pre-canonical "
+            "data-quality ruleset"
+        ),
+    )
 
+    quality_parser.add_argument(
+        "descriptor",
+        type=Path,
+        help="Path to Janus dataset descriptor JSON",
+    )
+
+    quality_parser.add_argument(
+        "--batch",
+        required=True,
+        type=UUID,
+        help="Completed governed import batch UUID",
+    )
     import_parser.add_argument(
         "descriptor",
         type=Path,
@@ -171,6 +192,98 @@ def run_import_release(
         f"{result['system_event_id']}"
     )
 
+def run_quality(
+    descriptor_path: Path,
+    import_batch_id: UUID,
+) -> None:
+    settings = get_settings()
+
+    descriptor = load_dataset_descriptor(
+        descriptor_path
+    )
+
+    print("JANUS PRE-CANONICAL DATA QUALITY")
+    print("--------------------------------")
+    print(f"Environment:  {settings.janus_env}")
+    print(
+        f"Release:      "
+        f"{descriptor.release.release_label}"
+    )
+    print(f"Import Batch: {import_batch_id}")
+    print()
+
+    result = quality_run(
+        settings,
+        descriptor,
+        import_batch_id=import_batch_id,
+    )
+
+    print("Quality run completed.")
+    print(
+        f"DQ Run ID:          "
+        f"{result['data_quality_run_id']}"
+    )
+    print(
+        f"Ruleset:            "
+        f"{result['ruleset_name']} "
+        f"v{result['ruleset_version']}"
+    )
+    print(
+        f"Rules Evaluated:    "
+        f"{result['rules_evaluated']}"
+    )
+    print(
+        f"Rules Passed:       "
+        f"{result['rules_passed']}"
+    )
+    print(
+        f"Rules Warned:       "
+        f"{result['rules_warned']}"
+    )
+    print(
+        f"Rules Failed:       "
+        f"{result['rules_failed']}"
+    )
+    print(
+        f"Records Evaluated:  "
+        f"{result['records_evaluated']}"
+    )
+    print(
+        f"Records Quarantined:"
+        f" {result['records_quarantined']}"
+    )
+    print(
+        f"Quality Gate:       "
+        f"{result['gate_decision'].upper()}"
+    )
+    print(
+        f"Gate Decision ID:   "
+        f"{result['quality_gate_decision_id']}"
+    )
+    print(
+        f"System Event:       "
+        f"{result['system_event_id']}"
+    )
+
+    print()
+    print("Rule Results:")
+
+    for rule in result["rule_results"]:
+        print(
+            f"  {rule['rule_code']}: "
+            f"{rule['outcome'].upper()} "
+            f"(evaluated={rule['records_evaluated']}, "
+            f"failed={rule['records_failed']})"
+        )
+
+    if result["deferred_rules"]:
+        print()
+        print("Deferred Rules:")
+
+        for rule_code, reason in (
+            result["deferred_rules"].items()
+        ):
+            print(f"  {rule_code}: {reason}")
 def main(
     argv: Sequence[str] | None = None,
 ) -> None:
@@ -193,6 +306,13 @@ def main(
 
     if args.command == "import-release":
         run_import_release(args.descriptor)
+        return
+
+    if args.command == "quality-run":
+        run_quality(
+            args.descriptor,
+            args.batch,
+        )
         return
 
     parser.error(f"Unsupported command: {args.command}")

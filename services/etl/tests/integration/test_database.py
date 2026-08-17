@@ -1,10 +1,10 @@
 import os
 
 import pytest
+from psycopg.errors import InsufficientPrivilege
 
 from janus_etl.config import get_settings
 from janus_etl.db import health_check, open_connection
-from psycopg.errors import InsufficientPrivilege
 
 RUN_INTEGRATION_TESTS = os.getenv("JANUS_RUN_INTEGRATION_TESTS") == "1"
 APPROVED_RELEASE_LABEL = os.getenv("JANUS_TEST_APPROVED_RELEASE_LABEL")
@@ -94,30 +94,28 @@ def test_etl_governance_boundary() -> None:
 
         # Direct access to governance review data must
         # be denied to the ETL service.
-        with pytest.raises(InsufficientPrivilege):
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
+        with pytest.raises(InsufficientPrivilege), conn.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT 1
                     FROM governance.dataset_review
                     LIMIT 1;
                     """
-                )
+            )
 
         # An expected PostgreSQL permission error aborts
         # the current transaction. Reset before testing
         # the next protected object.
         conn.rollback()
 
-        with pytest.raises(InsufficientPrivilege):
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
+        with pytest.raises(InsufficientPrivilege), conn.cursor() as cursor:
+            cursor.execute(
+                """
                     SELECT 1
                     FROM governance.dataset_decision
                     LIMIT 1;
                     """
-                )
+            )
 
         conn.rollback()
 
