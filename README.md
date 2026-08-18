@@ -1,5 +1,5 @@
 Look inside Janus/Verify Migration:
-docker exec -it therapy-postgres psql -U janus_migrator_svc -d therapy
+docker exec -it therapy-postgres psql -U janus_etl_svc -d therapy
 Set Janus view:
 \x auto
 \pset null '[NULL]'

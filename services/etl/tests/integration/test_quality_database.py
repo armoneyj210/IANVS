@@ -139,11 +139,11 @@ def test_quality_identity_and_permissions() -> None:
                     'EXECUTE'
                 ) AS gate_execute,
 
-                has_table_privilege(
+                has_schema_privilege(
                     current_user,
-                    'clinical.patient',
-                    'INSERT'
-                ) AS clinical_insert,
+                    'clinical',
+                    'USAGE'
+                ) AS clinical_usage,
 
                 has_schema_privilege(
                     current_user,
@@ -176,7 +176,7 @@ def test_quality_identity_and_permissions() -> None:
     assert permissions["gate_insert"] is False
     assert permissions["gate_execute"] is True
 
-    assert permissions["clinical_insert"] is False
+    assert permissions["clinical_usage"] is False
     assert permissions["governance_usage"] is False
 
 
