@@ -10,14 +10,14 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
-from janus_etl.config import Settings
+from janus_etl.config import QualitySettings
 from janus_etl.dataset_descriptor import GovernedDatasetDescriptor
 from janus_etl.db import open_connection
 from janus_etl.import_runtime import preflight_release
 
 QUALITY_ENGINE_NAME = "janus-quality"
 RULESET_NAME = "janus-precanonical"
-RULESET_VERSION = "1"
+RULESET_VERSION = "2"
 
 RULE_EXPECTATIONS = {
     "JANUS-DQ-001": {
@@ -96,7 +96,7 @@ class RuleEvaluation:
     issues: tuple[QualityIssue, ...] = ()
 
 
-def _set_environment(cursor, settings: Settings) -> None:
+def _set_environment(cursor, settings: QualitySettings) -> None:
     cursor.execute(
         """
         SELECT set_config(
@@ -157,7 +157,7 @@ def _write_system_event(
 
 
 def _resolve_import_batch(
-    settings: Settings,
+    settings: QualitySettings,
     *,
     import_batch_id: UUID,
     dataset_release_id: UUID,
@@ -213,7 +213,7 @@ def _resolve_import_batch(
         return batch
 
 
-def _load_rules(settings: Settings) -> dict[str, dict[str, Any]]:
+def _load_rules(settings: QualitySettings) -> dict[str, dict[str, Any]]:
     with open_connection(settings) as conn, conn.cursor() as cursor:
         _set_environment(cursor, settings)
 
@@ -279,7 +279,7 @@ def _load_rules(settings: Settings) -> dict[str, dict[str, Any]]:
 
 
 def _create_quality_run(
-    settings: Settings,
+    settings: QualitySettings,
     *,
     import_batch_id: UUID,
 ) -> dict[str, Any]:
@@ -357,6 +357,7 @@ def _create_quality_run(
                 Jsonb(
                     {
                         "deferred_rules": DEFERRED_RULES,
+                        "authority_principal": "janus_quality_svc",
                     }
                 ),
             ),
@@ -386,7 +387,7 @@ def _create_quality_run(
 
 
 def _load_file_record_map(
-    settings: Settings,
+    settings: QualitySettings,
     *,
     import_batch_id: UUID,
     source_file_id: UUID,
@@ -447,7 +448,7 @@ def _require_source_record(
 
 
 def _evaluate_dq001(
-    settings: Settings,
+    settings: QualitySettings,
     *,
     import_batch_id: UUID,
     severity: str,
@@ -512,7 +513,7 @@ def _evaluate_dq001(
 
 
 def _evaluate_dq002(
-    settings: Settings,
+    settings: QualitySettings,
     *,
     import_batch_id: UUID,
     severity: str,
@@ -605,7 +606,7 @@ def _identifier_fingerprint(value: str) -> str:
 
 
 def _evaluate_dq003(
-    settings: Settings,
+    settings: QualitySettings,
     *,
     import_batch_id: UUID,
     raw_directory: Path,
@@ -749,7 +750,7 @@ def _parse_temporal(value: str) -> datetime:
 
 
 def _evaluate_dq004(
-    settings: Settings,
+    settings: QualitySettings,
     *,
     import_batch_id: UUID,
     raw_directory: Path,
@@ -993,7 +994,7 @@ def _evaluate_dq005(
 
 
 def _persist_evaluation(
-    settings: Settings,
+    settings: QualitySettings,
     *,
     import_batch_id: UUID,
     data_quality_run_id: UUID,
@@ -1116,7 +1117,7 @@ def _persist_evaluation(
 
 
 def _complete_quality_run(
-    settings: Settings,
+    settings: QualitySettings,
     *,
     data_quality_run_id: UUID,
     import_batch_id: UUID,
@@ -1182,6 +1183,7 @@ def _complete_quality_run(
             "blocking_failure": bool(
                 summary["blocking_failure"]
             ),
+            "authority_principal": "janus_quality_svc",
         }
 
         cursor.execute(
@@ -1230,19 +1232,11 @@ def _complete_quality_run(
 
         cursor.execute(
             """
-            INSERT INTO ingest.quality_gate_decision (
-                data_quality_run_id,
-                decision,
-                decided_by,
-                decision_reason
-            )
-            VALUES (
+            SELECT ingest.write_quality_gate_decision(
                 %s,
                 %s,
-                current_user,
                 %s
-            )
-            RETURNING quality_gate_decision_id;
+            ) AS quality_gate_decision_id;
             """,
             (
                 data_quality_run_id,
@@ -1295,7 +1289,7 @@ def _complete_quality_run(
 
 
 def _fail_quality_run(
-    settings: Settings,
+    settings: QualitySettings,
     *,
     data_quality_run_id: UUID,
     import_batch_id: UUID,
@@ -1332,18 +1326,11 @@ def _fail_quality_run(
 
         cursor.execute(
             """
-            INSERT INTO ingest.quality_gate_decision (
-                data_quality_run_id,
-                decision,
-                decided_by,
-                decision_reason
-            )
-            VALUES (
+            SELECT ingest.write_quality_gate_decision(
                 %s,
                 'fail',
-                current_user,
                 %s
-            );
+            ) AS quality_gate_decision_id;
             """,
             (
                 data_quality_run_id,
@@ -1369,7 +1356,7 @@ def _fail_quality_run(
 
 
 def quality_run(
-    settings: Settings,
+    settings: QualitySettings,
     descriptor: GovernedDatasetDescriptor,
     *,
     import_batch_id: UUID,

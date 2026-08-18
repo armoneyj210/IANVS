@@ -9,7 +9,11 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
-from janus_etl.config import REPO_ROOT, Settings
+from janus_etl.config import (
+    REPO_ROOT,
+    DatabaseSettings,
+    Settings,
+)
 from janus_etl.dataset_descriptor import GovernedDatasetDescriptor
 from janus_etl.dataset_registry import (
     count_csv_rows,
@@ -18,7 +22,10 @@ from janus_etl.dataset_registry import (
 from janus_etl.db import open_connection
 
 
-def _set_environment(cursor, settings: Settings) -> None:
+def _set_environment(
+    cursor,
+    settings: DatabaseSettings,
+) -> None:
     cursor.execute(
         """
         SELECT set_config(
@@ -85,7 +92,7 @@ def _write_system_event(
 
 
 def _resolve_registered_release(
-    settings: Settings,
+    settings: DatabaseSettings,
     descriptor: GovernedDatasetDescriptor,
     manifest_digest: str,
 ) -> dict[str, Any]:
@@ -136,7 +143,7 @@ def _resolve_registered_release(
 
 
 def _load_registered_source_files(
-    settings: Settings,
+    settings: DatabaseSettings,
     dataset_release_id: UUID,
 ) -> list[dict[str, Any]]:
     with open_connection(settings) as conn, conn.cursor() as cursor:
@@ -162,7 +169,7 @@ def _load_registered_source_files(
 
 
 def preflight_release(
-    settings: Settings,
+    settings: DatabaseSettings,
     descriptor: GovernedDatasetDescriptor,
 ) -> dict[str, Any]:
     raw_directory = descriptor.resolve_raw_directory()

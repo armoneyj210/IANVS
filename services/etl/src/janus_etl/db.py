@@ -4,10 +4,10 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from janus_etl.config import Settings
+from janus_etl.config import DatabaseSettings, Settings
 
 
-def open_connection(settings: Settings):
+def open_connection(settings: DatabaseSettings):
     return psycopg.connect(
         host=settings.postgres_host,
         port=settings.postgres_port,

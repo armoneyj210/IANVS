@@ -13,7 +13,10 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
         not RUN_INTEGRATION_TESTS,
-        reason=("Set JANUS_RUN_INTEGRATION_TESTS=1 to run database integration tests"),
+        reason=(
+            "Set JANUS_RUN_INTEGRATION_TESTS=1 "
+            "to run database integration tests"
+        ),
     ),
 ]
 
@@ -50,26 +53,84 @@ def test_etl_permission_boundary() -> None:
                 has_table_privilege(
                     current_user,
                     'clinical.patient',
+                    'SELECT'
+                ) AS can_select_patient,
+
+                has_table_privilege(
+                    current_user,
+                    'clinical.patient',
                     'INSERT'
                 ) AS can_insert_patient,
 
                 has_table_privilege(
                     current_user,
-                    'clinical.patient',
-                    'DELETE'
-                ) AS can_delete_patient;
+                    'ingest.source_record',
+                    'INSERT'
+                ) AS can_insert_source_record,
+
+                has_table_privilege(
+                    current_user,
+                    'ingest.source_record',
+                    'UPDATE'
+                ) AS can_update_source_record,
+
+                has_table_privilege(
+                    current_user,
+                    'ingest.data_quality_run',
+                    'INSERT'
+                ) AS can_insert_quality_run,
+
+                has_table_privilege(
+                    current_user,
+                    'ingest.data_quality_result',
+                    'INSERT'
+                ) AS can_insert_quality_result,
+
+                has_table_privilege(
+                    current_user,
+                    'ingest.quality_gate_decision',
+                    'INSERT'
+                ) AS can_insert_gate_decision;
             """
         )
 
         permissions = cursor.fetchone()
 
     assert permissions is not None
-
     assert permissions["can_create_clinical_objects"] is False
+    assert permissions["can_select_patient"] is True
+    assert permissions["can_insert_patient"] is False
 
-    assert permissions["can_insert_patient"] is True
+    assert permissions["can_insert_source_record"] is True
+    assert permissions["can_update_source_record"] is False
 
-    assert permissions["can_delete_patient"] is False
+    assert permissions["can_insert_quality_run"] is False
+    assert permissions["can_insert_quality_result"] is False
+    assert permissions["can_insert_gate_decision"] is False
+
+
+def test_etl_cannot_call_quality_gate_writer() -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    with open_connection(settings) as conn:
+        with (
+            pytest.raises(InsufficientPrivilege),
+            conn.cursor() as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT ingest.write_quality_gate_decision(
+                    %s::uuid,
+                    'pass',
+                    'ETL must not certify quality'
+                );
+                """,
+                ("00000000-0000-0000-0000-000000000000",),
+            )
+
+        conn.rollback()
+
 
 def test_etl_governance_boundary() -> None:
     get_settings.cache_clear()
@@ -92,32 +153,34 @@ def test_etl_governance_boundary() -> None:
         assert permissions is not None
         assert permissions["can_use_governance"] is False
 
-        # Direct access to governance review data must
-        # be denied to the ETL service.
-        with pytest.raises(InsufficientPrivilege), conn.cursor() as cursor:
+        with (
+            pytest.raises(InsufficientPrivilege),
+            conn.cursor() as cursor,
+        ):
             cursor.execute(
                 """
-                    SELECT 1
-                    FROM governance.dataset_review
-                    LIMIT 1;
-                    """
-            )
-
-        # An expected PostgreSQL permission error aborts
-        # the current transaction. Reset before testing
-        # the next protected object.
-        conn.rollback()
-
-        with pytest.raises(InsufficientPrivilege), conn.cursor() as cursor:
-            cursor.execute(
+                SELECT 1
+                FROM governance.dataset_review
+                LIMIT 1;
                 """
-                    SELECT 1
-                    FROM governance.dataset_decision
-                    LIMIT 1;
-                    """
             )
 
         conn.rollback()
+
+        with (
+            pytest.raises(InsufficientPrivilege),
+            conn.cursor() as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT 1
+                FROM governance.dataset_decision
+                LIMIT 1;
+                """
+            )
+
+        conn.rollback()
+
 
 @pytest.mark.skipif(
     not APPROVED_RELEASE_LABEL,
@@ -180,6 +243,4 @@ def test_approved_release_passes_import_gate() -> None:
             assert batch is not None
             assert batch["status"] == "running"
 
-        # Exercise the real governance trigger without
-        # leaving a fake operational batch behind.
         conn.rollback()

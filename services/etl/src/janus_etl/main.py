@@ -3,7 +3,10 @@ from collections.abc import Sequence
 from pathlib import Path
 from uuid import UUID
 
-from janus_etl.config import get_settings
+from janus_etl.config import (
+    get_quality_settings,
+    get_settings,
+)
 from janus_etl.dataset_descriptor import (
     load_dataset_descriptor,
 )
@@ -196,7 +199,7 @@ def run_quality(
     descriptor_path: Path,
     import_batch_id: UUID,
 ) -> None:
-    settings = get_settings()
+    settings = get_quality_settings()
 
     descriptor = load_dataset_descriptor(
         descriptor_path
