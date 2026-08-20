@@ -14,6 +14,9 @@ from janus_etl.dataset_registry import register_dataset
 from janus_etl.db import health_check
 from janus_etl.import_runtime import import_release
 from janus_etl.manifest import write_manifest
+from janus_etl.postcanonical_quality_runtime import (
+    postcanonical_lineage_quality_run,
+)
 from janus_etl.quality_runtime import quality_run
 
 
@@ -75,6 +78,26 @@ def build_parser() -> argparse.ArgumentParser:
         type=UUID,
         help="Completed governed import batch UUID",
     )
+
+    lineage_quality_parser = (
+        subparsers.add_parser(
+            "lineage-quality-run",
+            help=(
+                "Execute JANUS-DQ-006 against a "
+                "completed canonical promotion"
+            ),
+        )
+    )
+
+    lineage_quality_parser.add_argument(
+        "--promotion",
+        required=True,
+        type=UUID,
+        help=(
+            "Completed canonical promotion run UUID"
+        ),
+    )   
+
     import_parser.add_argument(
         "descriptor",
         type=Path,
@@ -287,6 +310,63 @@ def run_quality(
             result["deferred_rules"].items()
         ):
             print(f"  {rule_code}: {reason}")
+
+def run_lineage_quality(
+    canonical_promotion_run_id: UUID,
+) -> None:
+    settings = get_quality_settings()
+
+    print("JANUS POST-CANONICAL LINEAGE QUALITY")
+    print("------------------------------------")
+    print(f"Environment: {settings.janus_env}")
+    print(
+        f"Promotion:   "
+        f"{canonical_promotion_run_id}"
+    )
+    print()
+
+    result = postcanonical_lineage_quality_run(
+        settings,
+        canonical_promotion_run_id=(
+            canonical_promotion_run_id
+        ),
+    )
+
+    print("Post-canonical quality completed.")
+    print(
+        f"DQ Run ID:       "
+        f"{result['data_quality_run_id']}"
+    )
+    print(
+        f"Ruleset:         "
+        f"{result['ruleset_name']} "
+        f"v{result['ruleset_version']}"
+    )
+    print(
+        f"Rule:            "
+        f"{result['rule_code']}"
+    )
+    print(
+        f"Rule Outcome:    "
+        f"{result['rule_outcome'].upper()}"
+    )
+    print(
+        f"Records Failed:  "
+        f"{result['records_failed']}"
+    )
+    print(
+        f"Quality Gate:    "
+        f"{result['gate_decision'].upper()}"
+    )
+    print(
+        f"Gate Decision:   "
+        f"{result['quality_gate_decision_id']}"
+    )
+    print(
+        f"System Event:    "
+        f"{result['system_event_id']}"
+    )
+
 def main(
     argv: Sequence[str] | None = None,
 ) -> None:
@@ -315,6 +395,12 @@ def main(
         run_quality(
             args.descriptor,
             args.batch,
+        )
+        return
+
+    if args.command == "lineage-quality-run":
+        run_lineage_quality(
+            args.promotion,
         )
         return
 
