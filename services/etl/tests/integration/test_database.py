@@ -43,7 +43,22 @@ def test_etl_permission_boundary() -> None:
     ):
         cursor.execute(
             """
+            WITH patient_table AS (
+                SELECT c.oid AS table_oid
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n
+                  ON n.oid = c.relnamespace
+                WHERE n.nspname = 'clinical'
+                  AND c.relname = 'patient'
+                  AND c.relkind IN ('r', 'p')
+            )
             SELECT
+                has_schema_privilege(
+                    current_user,
+                    'clinical',
+                    'USAGE'
+                ) AS can_use_clinical_schema,
+
                 has_schema_privilege(
                     current_user,
                     'clinical',
@@ -52,15 +67,21 @@ def test_etl_permission_boundary() -> None:
 
                 has_table_privilege(
                     current_user,
-                    'clinical.patient',
+                    patient_table.table_oid,
                     'SELECT'
                 ) AS can_select_patient,
 
                 has_table_privilege(
                     current_user,
-                    'clinical.patient',
+                    patient_table.table_oid,
                     'INSERT'
                 ) AS can_insert_patient,
+
+                has_table_privilege(
+                    current_user,
+                    'ingest.source_record',
+                    'SELECT'
+                ) AS can_select_source_record,
 
                 has_table_privilege(
                     current_user,
@@ -72,7 +93,21 @@ def test_etl_permission_boundary() -> None:
                     current_user,
                     'ingest.source_record',
                     'UPDATE'
-                ) AS can_update_source_record,
+                ) AS can_update_source_record_table,
+
+                has_column_privilege(
+                    current_user,
+                    'ingest.source_record',
+                    'record_status',
+                    'UPDATE'
+                ) AS can_update_source_record_status,
+
+                has_column_privilege(
+                    current_user,
+                    'ingest.source_record',
+                    'payload_sha256',
+                    'UPDATE'
+                ) AS can_update_source_record_payload_hash,
 
                 has_table_privilege(
                     current_user,
@@ -90,23 +125,62 @@ def test_etl_permission_boundary() -> None:
                     current_user,
                     'ingest.quality_gate_decision',
                     'INSERT'
-                ) AS can_insert_gate_decision;
+                ) AS can_insert_gate_decision,
+
+                pg_has_role(
+                    current_user,
+                    'janus_clinical_ro',
+                    'MEMBER'
+                ) AS is_clinical_reader,
+
+                pg_has_role(
+                    current_user,
+                    'janus_clinical_rw',
+                    'MEMBER'
+                ) AS is_clinical_writer
+
+            FROM patient_table;
             """
         )
 
         permissions = cursor.fetchone()
 
     assert permissions is not None
-    assert permissions["can_create_clinical_objects"] is False
-    assert permissions["can_select_patient"] is True
-    assert permissions["can_insert_patient"] is False
 
+    # ETL may read and create governed source evidence.
+    assert permissions["can_select_source_record"] is True
     assert permissions["can_insert_source_record"] is True
-    assert permissions["can_update_source_record"] is False
 
+    # Once imported, ETL must not mutate source evidence.
+    assert (
+        permissions["can_update_source_record_table"]
+        is False
+    )
+
+    # V010 explicitly removed post-import record-state
+    # mutation from ETL authority.
+    assert (
+        permissions["can_update_source_record_status"]
+        is False
+    )
+
+    # Source payload evidence is immutable to ETL.
+    assert (
+        permissions[
+            "can_update_source_record_payload_hash"
+        ]
+        is False
+    )
+
+    # Quality certification remains outside ETL authority.
     assert permissions["can_insert_quality_run"] is False
     assert permissions["can_insert_quality_result"] is False
     assert permissions["can_insert_gate_decision"] is False
+
+    # Regression guard:
+    # ETL must never regain the broad clinical-read capability.
+    assert permissions["is_clinical_reader"] is False
+    assert permissions["is_clinical_writer"] is False
 
 
 def test_etl_cannot_call_quality_gate_writer() -> None:
