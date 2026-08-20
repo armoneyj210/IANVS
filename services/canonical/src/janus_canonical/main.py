@@ -1,0 +1,185 @@
+import argparse
+from collections.abc import Sequence
+from pathlib import Path
+from uuid import UUID
+
+from janus_etl.dataset_descriptor import (
+    load_dataset_descriptor,
+)
+
+from janus_canonical.config import get_settings
+from janus_canonical.db import health_check
+from janus_canonical.promotion_runtime import (
+    promote_patients,
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="janus-canonical",
+        description=(
+            "Janus governed canonical promotion service"
+        ),
+    )
+
+    subparsers = parser.add_subparsers(
+        dest="command"
+    )
+
+    subparsers.add_parser(
+        "health",
+        help=(
+            "Verify the Canonical service database "
+            "identity"
+        ),
+    )
+
+    promote_parser = subparsers.add_parser(
+        "promote-patients",
+        help=(
+            "Promote quality-certified Synthea "
+            "patients into canonical clinical state"
+        ),
+    )
+
+    promote_parser.add_argument(
+        "descriptor",
+        type=Path,
+        help=(
+            "Path to Janus governed dataset "
+            "descriptor JSON"
+        ),
+    )
+
+    promote_parser.add_argument(
+        "--batch",
+        required=True,
+        type=UUID,
+        help="Completed governed import batch UUID",
+    )
+
+    return parser
+
+
+def run_health() -> None:
+    settings = get_settings()
+
+    result = health_check(settings)
+
+    print("JANUS CANONICAL")
+    print("---------------")
+    print("Database connection successful.")
+    print(
+        f"Environment:  {settings.janus_env}"
+    )
+    print(
+        f"Database:     {result['database']}"
+    )
+    print(
+        f"Principal:    "
+        f"{result['db_principal']}"
+    )
+    print(
+        f"Application:  "
+        f"{result['application_name']}"
+    )
+    print(
+        f"System Event: "
+        f"{result['system_event_id']}"
+    )
+
+
+def run_promote_patients(
+    descriptor_path: Path,
+    import_batch_id: UUID,
+) -> None:
+    settings = get_settings()
+
+    descriptor = load_dataset_descriptor(
+        descriptor_path
+    )
+
+    print("JANUS CANONICAL PATIENT PROMOTION")
+    print("---------------------------------")
+    print(
+        f"Environment:  {settings.janus_env}"
+    )
+    print(
+        f"Release:      "
+        f"{descriptor.release.release_label}"
+    )
+    print(
+        f"Import Batch: {import_batch_id}"
+    )
+    print()
+
+    result = promote_patients(
+        settings,
+        descriptor,
+        import_batch_id=import_batch_id,
+    )
+
+    print("Canonical patient promotion completed.")
+    print(
+        f"Promotion Run:      "
+        f"{result['canonical_promotion_run_id']}"
+    )
+    print(
+        f"Mapping:            "
+        f"{result['mapping_name']} "
+        f"v{result['mapping_version']}"
+    )
+    print(
+        f"Records Seen:       "
+        f"{result['records_seen']}"
+    )
+    print(
+        f"Patients Created:   "
+        f"{result['records_created']}"
+    )
+    print(
+        f"Patients Existing:  "
+        f"{result['records_existing']}"
+    )
+    print(
+        f"Records Failed:     "
+        f"{result['records_failed']}"
+    )
+    print(
+        f"Identifiers Created:"
+        f" {result['identifiers_created']}"
+    )
+    print(
+        f"Lineage Edges:      "
+        f"{result['lineage_edges_created']}"
+    )
+    print(
+        f"Completed Event:    "
+        f"{result['completed_system_event_id']}"
+    )
+
+
+def main(
+    argv: Sequence[str] | None = None,
+) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command in (None, "health"):
+        run_health()
+        return
+
+    if args.command == "promote-patients":
+        run_promote_patients(
+            args.descriptor,
+            args.batch,
+        )
+        return
+
+    parser.error(
+        f"Unsupported command: {args.command}"
+    )
+
+
+if __name__ == "__main__":
+    main()
