@@ -27,6 +27,9 @@ PROMOTION_RUN_ID = os.getenv(
 PROVIDER_PROMOTION_RUN_ID = os.getenv(
     "JANUS_TEST_PROVIDER_PROMOTION_RUN_ID"
 )
+ENCOUNTER_PROMOTION_RUN_ID = os.getenv(
+    "JANUS_TEST_ENCOUNTER_PROMOTION_RUN_ID"
+)
 
 
 pytestmark = [
@@ -90,11 +93,17 @@ def test_postcanonical_quality_permissions() -> None:
                     'EXECUTE'
                 ) AS scope_execute,
 
-                has_function_privilege(
+                                has_function_privilege(
                     current_user,
                     'ingest.evaluate_provider_canonical_lineage(uuid)',
                     'EXECUTE'
                 ) AS provider_evidence_execute,
+
+                has_function_privilege(
+                    current_user,
+                    'ingest.evaluate_encounter_canonical_lineage(uuid)',
+                    'EXECUTE'
+                ) AS encounter_evidence_execute,
 
                 has_function_privilege(
                     current_user,
@@ -123,6 +132,12 @@ def test_postcanonical_quality_permissions() -> None:
     assert (
         permissions[
             "provider_evidence_execute"
+        ]
+        is True
+    )
+    assert (
+        permissions[
+            "encounter_evidence_execute"
         ]
         is True
     )
@@ -255,6 +270,112 @@ def test_provider_promotion_passes_dq006_evidence() -> None:
         evidence[
             "provider_targets_with_multiple_"
             "organization_edges"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence["violation_count"]
+        == 0
+    )
+
+    assert (
+        evidence["lineage_complete"]
+        is True
+    )
+
+    assert evaluation.outcome == "pass"
+
+@pytest.mark.skipif(
+    not ENCOUNTER_PROMOTION_RUN_ID,
+    reason=(
+        "Set JANUS_TEST_ENCOUNTER_PROMOTION_RUN_ID "
+        "to test Encounter DQ-006 evidence"
+    ),
+)
+def test_encounter_promotion_passes_dq006_evidence() -> None:
+    get_quality_settings.cache_clear()
+    settings = get_quality_settings()
+
+    promotion_run_id = UUID(
+        ENCOUNTER_PROMOTION_RUN_ID
+    )
+
+    evidence = _load_lineage_evidence(
+        settings,
+        canonical_promotion_run_id=(
+            promotion_run_id
+        ),
+    )
+
+    evaluation = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert (
+        evidence["mapping_name"]
+        == "synthea-encounter"
+    )
+
+    assert evidence["mapping_version"] == "1"
+
+    assert (
+        evidence["expected_encounter_sources"]
+        == 6950
+    )
+
+    assert (
+        evidence[
+            "valid_encounter_lineage_edges"
+        ]
+        == 6950
+    )
+
+    assert (
+        evidence[
+            "valid_identifier_lineage_edges"
+        ]
+        == 6950
+    )
+
+    assert (
+        evidence[
+            "encounter_sources_missing_lineage"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "identifier_sources_missing_lineage"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "invalid_identifier_contract"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "encounter_identifier_pair_mismatches"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "uncertified_patient_dependencies"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "uncertified_provider_dependencies"
         ]
         == 0
     )

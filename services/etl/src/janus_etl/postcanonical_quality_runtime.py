@@ -233,6 +233,36 @@ def _load_provider_lineage_evidence(
 
     return evidence
 
+def _load_encounter_lineage_evidence(
+    settings: QualitySettings,
+    *,
+    canonical_promotion_run_id: UUID,
+) -> dict[str, Any]:
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM ingest.evaluate_encounter_canonical_lineage(
+                %s
+            );
+            """,
+            (canonical_promotion_run_id,),
+        )
+
+        evidence = cursor.fetchone()
+
+    if evidence is None:
+        raise RuntimeError(
+            "Encounter canonical lineage evaluator "
+            "returned no evidence"
+        )
+
+    return evidence
 
 def _load_lineage_evidence(
     settings: QualitySettings,
@@ -265,6 +295,17 @@ def _load_lineage_evidence(
         and mapping_version == "1"
     ):
         return _load_provider_lineage_evidence(
+            settings,
+            canonical_promotion_run_id=(
+                canonical_promotion_run_id
+            ),
+        )
+
+    if (
+        mapping_name == "synthea-encounter"
+        and mapping_version == "1"
+    ):
+        return _load_encounter_lineage_evidence(
             settings,
             canonical_promotion_run_id=(
                 canonical_promotion_run_id
@@ -528,6 +569,153 @@ def _evaluate_provider_lineage_evidence(
         details=details,
     )
 
+def _evaluate_encounter_lineage_evidence(
+    evidence: dict[str, Any],
+) -> LineageEvaluation:
+    expected_encounter_sources = evidence[
+        "expected_encounter_sources"
+    ]
+
+    violation_fields = (
+        "encounter_sources_missing_lineage",
+        "encounter_sources_with_multiple_targets",
+        "encounter_targets_with_multiple_sources",
+        "identifier_sources_missing_lineage",
+        "identifier_sources_with_multiple_targets",
+        "identifier_targets_with_multiple_sources",
+        "encounter_orphan_targets",
+        "identifier_orphan_targets",
+        "invalid_identifier_contract",
+        "encounter_identifier_pair_mismatches",
+        "uncertified_patient_dependencies",
+        "uncertified_provider_dependencies",
+        "wrong_source_artifact_edges",
+        "wrong_mapping_version_edges",
+        "wrong_transformation_edges",
+        "unexpected_target_edges",
+        "promotion_counter_mismatch",
+        "encounter_target_count_mismatch",
+        "identifier_target_count_mismatch",
+    )
+
+    no_violations = all(
+        evidence[field] == 0
+        for field in violation_fields
+    )
+
+    encounter_coverage_complete = (
+        expected_encounter_sources > 0
+        and evidence[
+            "promotion_records_seen"
+        ]
+        == expected_encounter_sources
+        and evidence[
+            "promotion_records_failed"
+        ]
+        == 0
+        and evidence[
+            "valid_encounter_lineage_edges"
+        ]
+        == expected_encounter_sources
+        and evidence[
+            "encounter_lineage_sources"
+        ]
+        == expected_encounter_sources
+        and evidence[
+            "encounter_lineage_targets"
+        ]
+        == expected_encounter_sources
+    )
+
+    identifier_coverage_complete = (
+        expected_encounter_sources > 0
+        and evidence[
+            "valid_identifier_lineage_edges"
+        ]
+        == expected_encounter_sources
+        and evidence[
+            "identifier_lineage_sources"
+        ]
+        == expected_encounter_sources
+        and evidence[
+            "identifier_lineage_targets"
+        ]
+        == expected_encounter_sources
+    )
+
+    identity_pairing_complete = (
+        evidence[
+            "invalid_identifier_contract"
+        ]
+        == 0
+        and evidence[
+            "encounter_identifier_pair_mismatches"
+        ]
+        == 0
+    )
+
+    dependency_certification_complete = (
+        evidence[
+            "uncertified_patient_dependencies"
+        ]
+        == 0
+        and evidence[
+            "uncertified_provider_dependencies"
+        ]
+        == 0
+    )
+
+    aggregate_contract_consistent = (
+        evidence["violation_count"] == 0
+        and evidence["lineage_complete"] is True
+    )
+
+    passed = (
+        no_violations
+        and encounter_coverage_complete
+        and identifier_coverage_complete
+        and identity_pairing_complete
+        and dependency_certification_complete
+        and aggregate_contract_consistent
+    )
+
+    details = {
+        "requirement":
+            "100_percent_canonical_lineage",
+        "mapping_name":
+            evidence["mapping_name"],
+        "mapping_version":
+            evidence["mapping_version"],
+        "evidence":
+            _json_safe_evidence(evidence),
+        "quality_interpretation": {
+            "no_violations":
+                no_violations,
+            "encounter_coverage_complete":
+                encounter_coverage_complete,
+            "identifier_coverage_complete":
+                identifier_coverage_complete,
+            "identity_pairing_complete":
+                identity_pairing_complete,
+            "dependency_certification_complete":
+                dependency_certification_complete,
+            "aggregate_contract_consistent":
+                aggregate_contract_consistent,
+        },
+    }
+
+    return LineageEvaluation(
+        outcome="pass" if passed else "fail",
+        records_evaluated=1,
+        records_passed=1 if passed else 0,
+        records_failed=0 if passed else 1,
+        score=(
+            Decimal("1.000000")
+            if passed
+            else Decimal("0.000000")
+        ),
+        details=details,
+    )
 
 def _evaluate_lineage_evidence(
     evidence: dict[str, Any],
@@ -553,12 +741,19 @@ def _evaluate_lineage_evidence(
             evidence
         )
 
+    if (
+        mapping_name == "synthea-encounter"
+        and mapping_version == "1"
+    ):
+        return _evaluate_encounter_lineage_evidence(
+            evidence
+        )
+
     raise RuntimeError(
         "Unsupported canonical mapping for "
         "JANUS-DQ-006 evaluation: "
         f"{mapping_name} v{mapping_version}"
     )
-
 
 def _create_quality_run(
     settings: QualitySettings,
