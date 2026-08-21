@@ -115,6 +115,12 @@ def test_canonical_permission_boundary() -> None:
                     'EXECUTE'
                 ) AS condition_execute,
 
+                has_function_privilege(
+                    current_user,
+                    'ingest.promote_synthea_medication_v1(uuid,uuid,text,text,text,timestamp with time zone,timestamp with time zone,text,text)',
+                    'EXECUTE'
+                ) AS medication_execute,
+
                 has_schema_privilege(
                     current_user,
                     'clinical',
@@ -154,7 +160,7 @@ def test_canonical_permission_boundary() -> None:
     assert permissions["begin_execute"] is True
     assert permissions["patient_execute"] is True
     assert permissions["condition_execute"] is True
-
+    assert permissions["medication_execute"] is True
     assert permissions["clinical_usage"] is False
 
     assert (
@@ -288,6 +294,47 @@ def test_condition_writer_rejects_unknown_run() -> None:
                     'http://snomed.info/sct',
                     '123456',
                     'Test condition'
+                );
+                """,
+                (
+                    uuid4(),
+                    uuid4(),
+                    "0" * 64,
+                    str(uuid4()),
+                    str(uuid4()),
+                ),
+            )
+
+        conn.rollback()
+
+def test_medication_writer_rejects_unknown_run() -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    with open_connection(settings) as conn:
+        with (
+            pytest.raises(
+                RaiseException,
+                match=(
+                    "Unknown canonical "
+                    "promotion run"
+                ),
+            ),
+            conn.cursor() as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT *
+                FROM ingest.promote_synthea_medication_v1(
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    '2026-01-15T12:30:45Z',
+                    NULL,
+                    '123456',
+                    'Test medication'
                 );
                 """,
                 (
