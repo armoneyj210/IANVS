@@ -30,7 +30,9 @@ PROVIDER_PROMOTION_RUN_ID = os.getenv(
 ENCOUNTER_PROMOTION_RUN_ID = os.getenv(
     "JANUS_TEST_ENCOUNTER_PROMOTION_RUN_ID"
 )
-
+CONDITION_PROMOTION_RUN_ID = os.getenv(
+    "JANUS_TEST_CONDITION_PROMOTION_RUN_ID"
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -107,6 +109,12 @@ def test_postcanonical_quality_permissions() -> None:
 
                 has_function_privilege(
                     current_user,
+                    'ingest.evaluate_condition_canonical_lineage(uuid)',
+                    'EXECUTE'
+                ) AS condition_evidence_execute,
+
+                has_function_privilege(
+                    current_user,
                     'ingest.write_postcanonical_lineage_decision(uuid,text,text)',
                     'EXECUTE'
                 ) AS gate_execute;
@@ -138,6 +146,13 @@ def test_postcanonical_quality_permissions() -> None:
     assert (
         permissions[
             "encounter_evidence_execute"
+        ]
+        is True
+    )
+
+    assert (
+        permissions[
+            "condition_evidence_execute"
         ]
         is True
     )
@@ -389,5 +404,174 @@ def test_encounter_promotion_passes_dq006_evidence() -> None:
         evidence["lineage_complete"]
         is True
     )
+
+    assert evaluation.outcome == "pass"
+
+@pytest.mark.skipif(
+    not CONDITION_PROMOTION_RUN_ID,
+    reason=(
+        "Set JANUS_TEST_CONDITION_PROMOTION_RUN_ID "
+        "to test Condition DQ-006 evidence"
+    ),
+)
+def test_condition_promotion_passes_dq006_evidence() -> None:
+    get_quality_settings.cache_clear()
+    settings = get_quality_settings()
+
+    promotion_run_id = UUID(
+        CONDITION_PROMOTION_RUN_ID
+    )
+
+    evidence = _load_lineage_evidence(
+        settings,
+        canonical_promotion_run_id=(
+            promotion_run_id
+        ),
+    )
+
+    evaluation = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert (
+        evidence["mapping_name"]
+        == "synthea-condition"
+    )
+
+    assert evidence["mapping_version"] == "1"
+
+    assert (
+        evidence["expected_condition_sources"]
+        == 3932
+    )
+
+    assert (
+        evidence[
+            "valid_condition_lineage_edges"
+        ]
+        == 3932
+    )
+
+    assert (
+        evidence[
+            "condition_lineage_sources"
+        ]
+        == 3932
+    )
+
+    assert (
+        evidence[
+            "condition_lineage_targets"
+        ]
+        == 3932
+    )
+
+    assert (
+        evidence[
+            "condition_sources_missing_lineage"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "condition_sources_with_multiple_targets"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "condition_targets_with_multiple_sources"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "condition_orphan_targets"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "conditions_without_valid_patient"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "conditions_without_valid_encounter"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "patient_encounter_mismatches"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "conditions_missing_code_system"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "conditions_missing_code"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "conditions_missing_display"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "conditions_missing_onset_date"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "condition_temporal_violations"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "conditions_with_unexpected_clinical_status"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "uncertified_patient_dependencies"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "uncertified_encounter_dependencies"
+        ]
+        == 0
+    )
+
+    assert evidence["violation_count"] == 0
+    assert evidence["lineage_complete"] is True
 
     assert evaluation.outcome == "pass"

@@ -520,3 +520,232 @@ def test_encounter_quality_does_not_trust_boolean_alone() -> None:
     )
 
     assert result.outcome == "fail"
+
+def _passing_condition_evidence() -> dict:
+    return {
+        "canonical_promotion_run_id":
+            uuid4(),
+        "import_batch_id":
+            uuid4(),
+        "mapping_name":
+            "synthea-condition",
+        "mapping_version":
+            "1",
+
+        "promotion_records_seen":
+            3932,
+        "promotion_records_created":
+            3932,
+        "promotion_records_existing":
+            0,
+        "promotion_records_failed":
+            0,
+
+        "expected_condition_sources":
+            3932,
+
+        "valid_condition_lineage_edges":
+            3932,
+        "condition_lineage_sources":
+            3932,
+        "condition_lineage_targets":
+            3932,
+
+        "condition_sources_missing_lineage":
+            0,
+        "condition_sources_with_multiple_targets":
+            0,
+        "condition_targets_with_multiple_sources":
+            0,
+
+        "condition_orphan_targets":
+            0,
+
+        "conditions_without_valid_patient":
+            0,
+        "conditions_without_valid_encounter":
+            0,
+        "patient_encounter_mismatches":
+            0,
+
+        "conditions_missing_code_system":
+            0,
+        "conditions_missing_code":
+            0,
+        "conditions_missing_display":
+            0,
+        "conditions_missing_onset_date":
+            0,
+
+        "condition_temporal_violations":
+            0,
+
+        "conditions_with_unexpected_clinical_status":
+            0,
+
+        "uncertified_patient_dependencies":
+            0,
+        "uncertified_encounter_dependencies":
+            0,
+
+        "wrong_source_artifact_edges":
+            0,
+        "wrong_mapping_version_edges":
+            0,
+        "wrong_transformation_edges":
+            0,
+        "unexpected_target_edges":
+            0,
+
+        "promotion_counter_mismatch":
+            0,
+        "condition_target_count_mismatch":
+            0,
+
+        "violation_count":
+            0,
+        "lineage_complete":
+            True,
+    }
+
+
+def test_complete_condition_lineage_passes() -> None:
+    evidence = _passing_condition_evidence()
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "pass"
+    assert result.records_evaluated == 1
+    assert result.records_passed == 1
+    assert result.records_failed == 0
+
+
+def test_missing_condition_lineage_fails() -> None:
+    evidence = _passing_condition_evidence()
+
+    evidence[
+        "condition_sources_missing_lineage"
+    ] = 1
+
+    evidence[
+        "valid_condition_lineage_edges"
+    ] = 3931
+
+    evidence[
+        "condition_lineage_sources"
+    ] = 3931
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+    assert result.records_failed == 1
+
+
+def test_condition_patient_encounter_mismatch_fails() -> None:
+    evidence = _passing_condition_evidence()
+
+    evidence[
+        "patient_encounter_mismatches"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_uncertified_condition_patient_dependency_fails() -> None:
+    evidence = _passing_condition_evidence()
+
+    evidence[
+        "uncertified_patient_dependencies"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_uncertified_condition_encounter_dependency_fails() -> None:
+    evidence = _passing_condition_evidence()
+
+    evidence[
+        "uncertified_encounter_dependencies"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_condition_missing_code_system_fails() -> None:
+    evidence = _passing_condition_evidence()
+
+    evidence[
+        "conditions_missing_code_system"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_condition_unexpected_clinical_status_fails() -> None:
+    evidence = _passing_condition_evidence()
+
+    evidence[
+        "conditions_with_unexpected_clinical_status"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_condition_quality_does_not_trust_boolean_alone() -> None:
+    evidence = _passing_condition_evidence()
+
+    evidence[
+        "wrong_transformation_edges"
+    ] = 1
+
+    # Deliberately simulate inconsistent aggregate evidence.
+    evidence["violation_count"] = 0
+    evidence["lineage_complete"] = True
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
