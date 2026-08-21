@@ -124,3 +124,174 @@ def test_quality_does_not_trust_boolean_alone() -> None:
     )
 
     assert result.outcome == "fail"
+
+def _passing_provider_evidence() -> dict:
+    return {
+        "canonical_promotion_run_id":
+            uuid4(),
+        "import_batch_id":
+            uuid4(),
+        "mapping_name":
+            "synthea-provider",
+        "mapping_version":
+            "1",
+
+        "promotion_records_seen":
+            264,
+        "promotion_records_created":
+            264,
+        "promotion_records_existing":
+            0,
+        "promotion_records_failed":
+            0,
+
+        "expected_provider_sources":
+            264,
+
+        "valid_provider_lineage_edges":
+            264,
+        "provider_lineage_sources":
+            264,
+        "provider_lineage_targets":
+            264,
+
+        "provider_sources_missing_lineage":
+            0,
+        "provider_sources_with_multiple_targets":
+            0,
+        "provider_orphan_targets":
+            0,
+
+        "providers_with_organization_name":
+            200,
+
+        "valid_organization_lineage_edges":
+            200,
+        "organization_lineage_targets":
+            200,
+
+        (
+            "provider_targets_missing_"
+            "organization_lineage"
+        ):
+            0,
+
+        (
+            "provider_targets_with_unexpected_"
+            "organization_lineage"
+        ):
+            0,
+
+        (
+            "provider_targets_with_multiple_"
+            "organization_edges"
+        ):
+            0,
+
+        "organization_orphan_targets":
+            0,
+
+        "wrong_source_artifact_edges":
+            0,
+        "wrong_mapping_version_edges":
+            0,
+        "wrong_transformation_edges":
+            0,
+        "unexpected_target_edges":
+            0,
+
+        "promotion_counter_mismatch":
+            0,
+        "provider_target_count_mismatch":
+            0,
+
+        "violation_count":
+            0,
+        "lineage_complete":
+            True,
+    }
+
+
+def test_complete_provider_lineage_passes() -> None:
+    evidence = _passing_provider_evidence()
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "pass"
+    assert result.records_evaluated == 1
+    assert result.records_passed == 1
+    assert result.records_failed == 0
+
+
+def test_missing_provider_lineage_fails() -> None:
+    evidence = _passing_provider_evidence()
+
+    evidence[
+        "provider_sources_missing_lineage"
+    ] = 1
+
+    evidence[
+        "valid_provider_lineage_edges"
+    ] = 263
+
+    evidence[
+        "provider_lineage_sources"
+    ] = 263
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+    assert result.records_passed == 0
+    assert result.records_failed == 1
+
+
+def test_missing_provider_organization_lineage_fails() -> None:
+    evidence = _passing_provider_evidence()
+
+    evidence[
+        "provider_targets_missing_"
+        "organization_lineage"
+    ] = 1
+
+    evidence[
+        "valid_organization_lineage_edges"
+    ] = 199
+
+    evidence[
+        "organization_lineage_targets"
+    ] = 199
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+    assert result.records_failed == 1
+
+
+def test_provider_quality_does_not_trust_boolean_alone() -> None:
+    evidence = _passing_provider_evidence()
+
+    evidence[
+        "wrong_source_artifact_edges"
+    ] = 1
+
+    # Simulate inconsistent aggregate output.
+    evidence["violation_count"] = 0
+    evidence["lineage_complete"] = True
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"

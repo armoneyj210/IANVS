@@ -11,6 +11,7 @@ from janus_canonical.config import get_settings
 from janus_canonical.db import health_check
 from janus_canonical.promotion_runtime import (
     promote_patients,
+    promote_providers,
 )
 
 
@@ -58,6 +59,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Completed governed import batch UUID",
     )
 
+    provider_parser = subparsers.add_parser(
+        "promote-providers",
+        help=(
+            "Promote quality-certified Synthea "
+            "providers into canonical clinical state"
+        ),
+    )
+
+    provider_parser.add_argument(
+        "descriptor",
+        type=Path,
+        help=(
+            "Path to Janus governed dataset "
+            "descriptor JSON"
+        ),
+    )
+
+    provider_parser.add_argument(
+        "--batch",
+        required=True,
+        type=UUID,
+        help="Completed governed import batch UUID",
+    )
     return parser
 
 
@@ -158,6 +182,78 @@ def run_promote_patients(
         f"{result['completed_system_event_id']}"
     )
 
+def run_promote_providers(
+    descriptor_path: Path,
+    import_batch_id: UUID,
+) -> None:
+    settings = get_settings()
+
+    descriptor = load_dataset_descriptor(
+        descriptor_path
+    )
+
+    print("JANUS CANONICAL PROVIDER PROMOTION")
+    print("----------------------------------")
+    print(
+        f"Environment:  {settings.janus_env}"
+    )
+    print(
+        f"Release:      "
+        f"{descriptor.release.release_label}"
+    )
+    print(
+        f"Import Batch: {import_batch_id}"
+    )
+    print()
+
+    result = promote_providers(
+        settings,
+        descriptor,
+        import_batch_id=import_batch_id,
+    )
+
+    print("Canonical provider promotion completed.")
+    print(
+        f"Promotion Run:      "
+        f"{result['canonical_promotion_run_id']}"
+    )
+    print(
+        f"Mapping:            "
+        f"{result['mapping_name']} "
+        f"v{result['mapping_version']}"
+    )
+    print(
+        f"Records Seen:       "
+        f"{result['records_seen']}"
+    )
+    print(
+        f"Providers Created:  "
+        f"{result['records_created']}"
+    )
+    print(
+        f"Providers Existing: "
+        f"{result['records_existing']}"
+    )
+    print(
+        f"Records Failed:     "
+        f"{result['records_failed']}"
+    )
+    print(
+        f"With Organization:  "
+        f"{result['providers_with_organization']}"
+    )
+    print(
+        f"Organizations Used: "
+        f"{result['distinct_organizations_used']}"
+    )
+    print(
+        f"Lineage Edges:      "
+        f"{result['lineage_edges_created']}"
+    )
+    print(
+        f"Completed Event:    "
+        f"{result['completed_system_event_id']}"
+    )
 
 def main(
     argv: Sequence[str] | None = None,
@@ -171,6 +267,13 @@ def main(
 
     if args.command == "promote-patients":
         run_promote_patients(
+            args.descriptor,
+            args.batch,
+        )
+        return
+
+    if args.command == "promote-providers":
+        run_promote_providers(
             args.descriptor,
             args.batch,
         )

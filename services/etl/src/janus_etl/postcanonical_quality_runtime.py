@@ -132,7 +132,45 @@ def _load_dq006_rule(
     return rule
 
 
-def _load_lineage_evidence(
+def _resolve_lineage_scope(
+    settings: QualitySettings,
+    *,
+    canonical_promotion_run_id: UUID,
+) -> dict[str, Any]:
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM ingest.resolve_postcanonical_lineage_scope(
+                %s
+            );
+            """,
+            (canonical_promotion_run_id,),
+        )
+
+        scope = cursor.fetchone()
+
+    if scope is None:
+        raise RuntimeError(
+            "Post-canonical lineage scope resolver "
+            "returned no result"
+        )
+
+    if scope["promotion_status"] != "completed":
+        raise RuntimeError(
+            "DQ-006 requires a completed canonical "
+            "promotion"
+        )
+
+    return scope
+
+
+def _load_patient_lineage_evidence(
     settings: QualitySettings,
     *,
     canonical_promotion_run_id: UUID,
@@ -157,11 +195,87 @@ def _load_lineage_evidence(
 
     if evidence is None:
         raise RuntimeError(
-            "Canonical lineage evaluator returned no evidence"
+            "Patient canonical lineage evaluator "
+            "returned no evidence"
         )
 
     return evidence
 
+
+def _load_provider_lineage_evidence(
+    settings: QualitySettings,
+    *,
+    canonical_promotion_run_id: UUID,
+) -> dict[str, Any]:
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM ingest.evaluate_provider_canonical_lineage(
+                %s
+            );
+            """,
+            (canonical_promotion_run_id,),
+        )
+
+        evidence = cursor.fetchone()
+
+    if evidence is None:
+        raise RuntimeError(
+            "Provider canonical lineage evaluator "
+            "returned no evidence"
+        )
+
+    return evidence
+
+
+def _load_lineage_evidence(
+    settings: QualitySettings,
+    *,
+    canonical_promotion_run_id: UUID,
+) -> dict[str, Any]:
+    scope = _resolve_lineage_scope(
+        settings,
+        canonical_promotion_run_id=(
+            canonical_promotion_run_id
+        ),
+    )
+
+    mapping_name = scope["mapping_name"]
+    mapping_version = scope["mapping_version"]
+
+    if (
+        mapping_name == "synthea-patient"
+        and mapping_version == "1"
+    ):
+        return _load_patient_lineage_evidence(
+            settings,
+            canonical_promotion_run_id=(
+                canonical_promotion_run_id
+            ),
+        )
+
+    if (
+        mapping_name == "synthea-provider"
+        and mapping_version == "1"
+    ):
+        return _load_provider_lineage_evidence(
+            settings,
+            canonical_promotion_run_id=(
+                canonical_promotion_run_id
+            ),
+        )
+
+    raise RuntimeError(
+        "Unsupported canonical mapping for "
+        "JANUS-DQ-006: "
+        f"{mapping_name} v{mapping_version}"
+    )
 
 def _json_safe_evidence(
     evidence: dict[str, Any],
@@ -177,7 +291,7 @@ def _json_safe_evidence(
     return result
 
 
-def _evaluate_lineage_evidence(
+def _evaluate_patient_lineage_evidence(
     evidence: dict[str, Any],
 ) -> LineageEvaluation:
     expected_patient_sources = evidence[
@@ -257,29 +371,23 @@ def _evaluate_lineage_evidence(
     )
 
     details = {
-        "requirement": (
-            "100_percent_canonical_lineage"
-        ),
-        "mapping_name": evidence[
-            "mapping_name"
-        ],
-        "mapping_version": evidence[
-            "mapping_version"
-        ],
-        "evidence": _json_safe_evidence(
-            evidence
-        ),
+        "requirement":
+            "100_percent_canonical_lineage",
+        "mapping_name":
+            evidence["mapping_name"],
+        "mapping_version":
+            evidence["mapping_version"],
+        "evidence":
+            _json_safe_evidence(evidence),
         "quality_interpretation": {
-            "no_violations": no_violations,
-            "patient_coverage_complete": (
-                patient_coverage_complete
-            ),
-            "identifier_coverage_complete": (
-                identifier_coverage_complete
-            ),
-            "aggregate_contract_consistent": (
-                aggregate_contract_consistent
-            ),
+            "no_violations":
+                no_violations,
+            "patient_coverage_complete":
+                patient_coverage_complete,
+            "identifier_coverage_complete":
+                identifier_coverage_complete,
+            "aggregate_contract_consistent":
+                aggregate_contract_consistent,
         },
     }
 
@@ -294,6 +402,161 @@ def _evaluate_lineage_evidence(
             else Decimal("0.000000")
         ),
         details=details,
+    )
+
+
+def _evaluate_provider_lineage_evidence(
+    evidence: dict[str, Any],
+) -> LineageEvaluation:
+    expected_provider_sources = evidence[
+        "expected_provider_sources"
+    ]
+
+    providers_with_organization_name = evidence[
+        "providers_with_organization_name"
+    ]
+
+    violation_fields = (
+        "provider_sources_missing_lineage",
+        "provider_sources_with_multiple_targets",
+        "provider_orphan_targets",
+        (
+            "provider_targets_missing_"
+            "organization_lineage"
+        ),
+        (
+            "provider_targets_with_unexpected_"
+            "organization_lineage"
+        ),
+        (
+            "provider_targets_with_multiple_"
+            "organization_edges"
+        ),
+        "organization_orphan_targets",
+        "wrong_source_artifact_edges",
+        "wrong_mapping_version_edges",
+        "wrong_transformation_edges",
+        "unexpected_target_edges",
+        "promotion_counter_mismatch",
+        "provider_target_count_mismatch",
+    )
+
+    no_violations = all(
+        evidence[field] == 0
+        for field in violation_fields
+    )
+
+    provider_coverage_complete = (
+        expected_provider_sources > 0
+        and evidence[
+            "promotion_records_seen"
+        ]
+        == expected_provider_sources
+        and evidence[
+            "promotion_records_failed"
+        ]
+        == 0
+        and evidence[
+            "valid_provider_lineage_edges"
+        ]
+        == expected_provider_sources
+        and evidence[
+            "provider_lineage_sources"
+        ]
+        == expected_provider_sources
+        and evidence[
+            "provider_lineage_targets"
+        ]
+        == expected_provider_sources
+    )
+
+    organization_coverage_complete = (
+        providers_with_organization_name >= 0
+        and evidence[
+            "valid_organization_lineage_edges"
+        ]
+        == providers_with_organization_name
+        and evidence[
+            "organization_lineage_targets"
+        ]
+        == providers_with_organization_name
+    )
+
+    aggregate_contract_consistent = (
+        evidence["violation_count"] == 0
+        and evidence["lineage_complete"] is True
+    )
+
+    passed = (
+        no_violations
+        and provider_coverage_complete
+        and organization_coverage_complete
+        and aggregate_contract_consistent
+    )
+
+    details = {
+        "requirement":
+            "100_percent_canonical_lineage",
+        "mapping_name":
+            evidence["mapping_name"],
+        "mapping_version":
+            evidence["mapping_version"],
+        "evidence":
+            _json_safe_evidence(evidence),
+        "quality_interpretation": {
+            "no_violations":
+                no_violations,
+            "provider_coverage_complete":
+                provider_coverage_complete,
+            "organization_coverage_complete":
+                organization_coverage_complete,
+            "aggregate_contract_consistent":
+                aggregate_contract_consistent,
+        },
+    }
+
+    return LineageEvaluation(
+        outcome="pass" if passed else "fail",
+        records_evaluated=1,
+        records_passed=1 if passed else 0,
+        records_failed=0 if passed else 1,
+        score=(
+            Decimal("1.000000")
+            if passed
+            else Decimal("0.000000")
+        ),
+        details=details,
+    )
+
+
+def _evaluate_lineage_evidence(
+    evidence: dict[str, Any],
+) -> LineageEvaluation:
+    mapping_name = evidence["mapping_name"]
+    mapping_version = evidence[
+        "mapping_version"
+    ]
+
+    if (
+        mapping_name == "synthea-patient"
+        and mapping_version == "1"
+    ):
+        return _evaluate_patient_lineage_evidence(
+            evidence
+        )
+
+    if (
+        mapping_name == "synthea-provider"
+        and mapping_version == "1"
+    ):
+        return _evaluate_provider_lineage_evidence(
+            evidence
+        )
+
+    raise RuntimeError(
+        "Unsupported canonical mapping for "
+        "JANUS-DQ-006 evaluation: "
+        f"{mapping_name} v{mapping_version}"
     )
 
 

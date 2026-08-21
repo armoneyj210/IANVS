@@ -32,6 +32,18 @@ from janus_canonical.patient_mapping import (
     PATIENT_SOURCE_PATH,
     map_synthea_patient,
 )
+from janus_canonical.provider_mapping import (
+    MAPPING_NAME as PROVIDER_MAPPING_NAME,
+)
+from janus_canonical.provider_mapping import (
+    MAPPING_VERSION as PROVIDER_MAPPING_VERSION,
+)
+from janus_canonical.provider_mapping import (
+    ORGANIZATION_SOURCE_PATH,
+    PROVIDER_SOURCE_PATH,
+    map_synthea_organization,
+    map_synthea_provider,
+)
 
 
 def _service_version() -> str:
@@ -691,6 +703,844 @@ def promote_patients(
                     promotion_run_id
                 ),
                 import_batch_id=import_batch_id,
+                error=error,
+            )
+        except PsycopgError as fail_error:
+            error.add_note(
+                "Canonical fail-closed recording "
+                "also failed: "
+                f"{type(fail_error).__name__}: "
+                f"{fail_error}"
+            )
+
+        raise
+
+def _resolve_provider_source_file(
+    preflight: dict[str, Any],
+    relative_path: str,
+) -> dict[str, Any]:
+    matches = [
+        source_file
+        for source_file in preflight[
+            "importable_source_files"
+        ]
+        if source_file["relative_path"]
+        == relative_path
+    ]
+
+    if len(matches) != 1:
+        raise RuntimeError(
+            "Verified release must contain exactly one "
+            f"{relative_path} artifact"
+        )
+
+    return matches[0]
+
+
+def _load_provider_source_records(
+    settings: CanonicalSettings,
+    *,
+    import_batch_id: UUID,
+    source_file_id: UUID,
+    source_label: str,
+) -> dict[int, dict[str, Any]]:
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT
+                source_record_id,
+                row_number,
+                source_record_key,
+                resource_type,
+                record_locator,
+                payload_sha256,
+                record_status
+            FROM ingest.source_record
+            WHERE import_batch_id = %s
+              AND source_file_id = %s
+            ORDER BY row_number;
+            """,
+            (
+                import_batch_id,
+                source_file_id,
+            ),
+        )
+
+        rows = cursor.fetchall()
+
+    result: dict[int, dict[str, Any]] = {}
+
+    for row in rows:
+        row_number = row["row_number"]
+
+        if row_number is None:
+            raise RuntimeError(
+                f"{source_label} source record "
+                "is missing its row number"
+            )
+
+        if row_number in result:
+            raise RuntimeError(
+                f"Duplicate {source_label} source "
+                f"row number: {row_number}"
+            )
+
+        result[row_number] = row
+
+    return result
+
+
+def _verified_provider_payload_sha256(
+    *,
+    row: dict[str, str | None],
+    source_record: dict[str, Any],
+    source_label: str,
+    row_number: int,
+) -> str:
+    if (
+        source_record["record_status"]
+        != "accepted"
+    ):
+        raise RuntimeError(
+            f"{source_label} source record is not "
+            "accepted: "
+            f"row={row_number}, "
+            f"status="
+            f"{source_record['record_status']}"
+        )
+
+    payload = _canonical_row_payload(row)
+
+    payload_sha256 = hashlib.sha256(
+        payload
+    ).hexdigest()
+
+    if (
+        payload_sha256
+        != source_record["payload_sha256"]
+    ):
+        raise RuntimeError(
+            f"Physical {source_label} source row "
+            "does not match imported payload hash: "
+            f"row={row_number}"
+        )
+
+    return payload_sha256
+
+
+def _load_verified_provider_organizations(
+    preflight: dict[str, Any],
+    *,
+    source_records: dict[
+        int,
+        dict[str, Any],
+    ],
+    expected_rows: int,
+) -> dict[str, dict[str, Any]]:
+    organization_file_path = (
+        preflight["raw_directory"]
+        / ORGANIZATION_SOURCE_PATH
+    )
+
+    organizations: dict[
+        str,
+        dict[str, Any],
+    ] = {}
+
+    rows_seen = 0
+
+    with organization_file_path.open(
+        "r",
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        reader = csv.DictReader(handle)
+
+        if reader.fieldnames is None:
+            raise RuntimeError(
+                "organizations.csv has no header"
+            )
+
+        for row_number, row in enumerate(
+            reader,
+            start=1,
+        ):
+            source_record = source_records.get(
+                row_number
+            )
+
+            if source_record is None:
+                raise RuntimeError(
+                    "Verified organizations.csv row "
+                    "has no matching governed source "
+                    f"record: row={row_number}"
+                )
+
+            payload_sha256 = (
+                _verified_provider_payload_sha256(
+                    row=row,
+                    source_record=source_record,
+                    source_label="Organization",
+                    row_number=row_number,
+                )
+            )
+
+            organization = (
+                map_synthea_organization(row)
+            )
+
+            organization_id = (
+                organization.
+                synthea_organization_id
+            )
+
+            if organization_id in organizations:
+                raise RuntimeError(
+                    "Duplicate normalized Synthea "
+                    "organization Id: "
+                    f"{organization_id}"
+                )
+
+            organizations[
+                organization_id
+            ] = {
+                "source_record_id":
+                    source_record[
+                        "source_record_id"
+                    ],
+                "payload_sha256":
+                    payload_sha256,
+                "organization":
+                    organization,
+            }
+
+            rows_seen += 1
+
+    if rows_seen != expected_rows:
+        raise RuntimeError(
+            "Verified organization row count does "
+            "not match organizations.csv: "
+            f"expected={expected_rows}, "
+            f"actual={rows_seen}"
+        )
+
+    return organizations
+
+
+def _begin_provider_promotion(
+    settings: CanonicalSettings,
+    *,
+    import_batch_id: UUID,
+) -> dict[str, Any]:
+    service_version = _service_version()
+    git_commit_sha = _git_commit_sha()
+
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT ingest.begin_canonical_promotion(
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            ) AS canonical_promotion_run_id;
+            """,
+            (
+                import_batch_id,
+                PROVIDER_MAPPING_NAME,
+                PROVIDER_MAPPING_VERSION,
+                service_version,
+                git_commit_sha,
+            ),
+        )
+
+        promotion = cursor.fetchone()
+
+        if promotion is None:
+            raise RuntimeError(
+                "Provider promotion start returned "
+                "no result"
+            )
+
+        promotion_run_id = promotion[
+            "canonical_promotion_run_id"
+        ]
+
+        event_id = _write_system_event(
+            cursor,
+            event_type=(
+                "canonical."
+                "provider_promotion_started"
+            ),
+            outcome="success",
+            message=(
+                "Janus Synthea provider canonical "
+                "promotion started"
+            ),
+            metadata={
+                "canonical_promotion_run_id": str(
+                    promotion_run_id
+                ),
+                "import_batch_id": str(
+                    import_batch_id
+                ),
+                "mapping_name":
+                    PROVIDER_MAPPING_NAME,
+                "mapping_version":
+                    PROVIDER_MAPPING_VERSION,
+                "service_version":
+                    service_version,
+                "git_commit_sha":
+                    git_commit_sha,
+            },
+        )
+
+    return {
+        "canonical_promotion_run_id":
+            promotion_run_id,
+        "service_version": service_version,
+        "git_commit_sha": git_commit_sha,
+        "system_event_id": event_id,
+    }
+
+
+def _fail_provider_promotion(
+    settings: CanonicalSettings,
+    *,
+    canonical_promotion_run_id: UUID,
+    import_batch_id: UUID,
+    error: Exception,
+) -> None:
+    error_summary = {
+        "error_type": type(error).__name__,
+        "message": str(error)[:2000],
+    }
+
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT ingest.fail_canonical_promotion(
+                %s,
+                %s,
+                %s
+            ) AS canonical_promotion_run_id;
+            """,
+            (
+                canonical_promotion_run_id,
+                Jsonb(error_summary),
+                Jsonb(
+                    {
+                        "mapping_name":
+                            PROVIDER_MAPPING_NAME,
+                        "mapping_version":
+                            PROVIDER_MAPPING_VERSION,
+                    }
+                ),
+            ),
+        )
+
+        _write_system_event(
+            cursor,
+            event_type=(
+                "canonical."
+                "provider_promotion_failed"
+            ),
+            outcome="failure",
+            severity="error",
+            message=(
+                "Janus Synthea provider canonical "
+                "promotion failed"
+            ),
+            metadata={
+                "canonical_promotion_run_id": str(
+                    canonical_promotion_run_id
+                ),
+                "import_batch_id": str(
+                    import_batch_id
+                ),
+                "mapping_name":
+                    PROVIDER_MAPPING_NAME,
+                "mapping_version":
+                    PROVIDER_MAPPING_VERSION,
+                "error_type":
+                    error_summary["error_type"],
+            },
+        )
+
+
+def promote_providers(
+    settings: CanonicalSettings,
+    descriptor: GovernedDatasetDescriptor,
+    *,
+    import_batch_id: UUID,
+) -> dict[str, Any]:
+    preflight = preflight_release(
+        settings,
+        descriptor,
+    )
+
+    dataset_release_id = preflight["release"][
+        "dataset_release_id"
+    ]
+
+    batch = _resolve_import_batch(
+        settings,
+        import_batch_id=import_batch_id,
+        dataset_release_id=dataset_release_id,
+    )
+
+    provider_source_file = (
+        _resolve_provider_source_file(
+            preflight,
+            PROVIDER_SOURCE_PATH,
+        )
+    )
+
+    organization_source_file = (
+        _resolve_provider_source_file(
+            preflight,
+            ORGANIZATION_SOURCE_PATH,
+        )
+    )
+
+    expected_provider_rows = (
+        provider_source_file["row_count"]
+    )
+
+    expected_organization_rows = (
+        organization_source_file["row_count"]
+    )
+
+    if expected_provider_rows is None:
+        raise RuntimeError(
+            "Registered providers.csv row count "
+            "is missing"
+        )
+
+    if expected_organization_rows is None:
+        raise RuntimeError(
+            "Registered organizations.csv row count "
+            "is missing"
+        )
+
+    provider_source_records = (
+        _load_provider_source_records(
+            settings,
+            import_batch_id=import_batch_id,
+            source_file_id=provider_source_file[
+                "source_file_id"
+            ],
+            source_label="Provider",
+        )
+    )
+
+    organization_source_records = (
+        _load_provider_source_records(
+            settings,
+            import_batch_id=import_batch_id,
+            source_file_id=(
+                organization_source_file[
+                    "source_file_id"
+                ]
+            ),
+            source_label="Organization",
+        )
+    )
+
+    if (
+        len(provider_source_records)
+        != expected_provider_rows
+    ):
+        raise RuntimeError(
+            "Provider source-record count does "
+            "not match verified providers.csv: "
+            f"source_records="
+            f"{len(provider_source_records)}, "
+            f"verified_rows="
+            f"{expected_provider_rows}"
+        )
+
+    if (
+        len(organization_source_records)
+        != expected_organization_rows
+    ):
+        raise RuntimeError(
+            "Organization source-record count does "
+            "not match verified organizations.csv: "
+            f"source_records="
+            f"{len(organization_source_records)}, "
+            f"verified_rows="
+            f"{expected_organization_rows}"
+        )
+
+    organizations = (
+        _load_verified_provider_organizations(
+            preflight,
+            source_records=(
+                organization_source_records
+            ),
+            expected_rows=(
+                expected_organization_rows
+            ),
+        )
+    )
+
+    promotion = _begin_provider_promotion(
+        settings,
+        import_batch_id=import_batch_id,
+    )
+
+    promotion_run_id = promotion[
+        "canonical_promotion_run_id"
+    ]
+
+    records_seen = 0
+    records_created = 0
+    records_existing = 0
+    lineage_edges_created = 0
+
+    providers_with_organization = 0
+
+    organization_ids_used: set[str] = set()
+
+    provider_file_path = (
+        preflight["raw_directory"]
+        / PROVIDER_SOURCE_PATH
+    )
+
+    try:
+        with (
+            open_connection(settings) as conn,
+            conn.cursor() as cursor,
+            provider_file_path.open(
+                "r",
+                encoding="utf-8-sig",
+                newline="",
+            ) as handle,
+        ):
+            _set_environment(cursor, settings)
+
+            reader = csv.DictReader(handle)
+
+            if reader.fieldnames is None:
+                raise RuntimeError(
+                    "providers.csv has no header"
+                )
+
+            for row_number, row in enumerate(
+                reader,
+                start=1,
+            ):
+                source_record = (
+                    provider_source_records.get(
+                        row_number
+                    )
+                )
+
+                if source_record is None:
+                    raise RuntimeError(
+                        "Verified providers.csv row "
+                        "has no matching governed "
+                        "source record: "
+                        f"row={row_number}"
+                    )
+
+                provider_payload_sha256 = (
+                    _verified_provider_payload_sha256(
+                        row=row,
+                        source_record=source_record,
+                        source_label="Provider",
+                        row_number=row_number,
+                    )
+                )
+
+                provider = (
+                    map_synthea_provider(row)
+                )
+
+                organization_source_record_id = (
+                    None
+                )
+                organization_payload_sha256 = None
+                synthea_organization_id = None
+                organization_name = None
+
+                if (
+                    provider.
+                    synthea_organization_id
+                    is not None
+                ):
+                    organization_evidence = (
+                        organizations.get(
+                            provider.
+                            synthea_organization_id
+                        )
+                    )
+
+                    if organization_evidence is None:
+                        raise RuntimeError(
+                            "Provider references an "
+                            "unknown governed "
+                            "organization: "
+                            f"provider="
+                            f"{provider.synthea_provider_id}, "
+                            f"organization="
+                            f"{provider.synthea_organization_id}"
+                        )
+
+                    organization = (
+                        organization_evidence[
+                            "organization"
+                        ]
+                    )
+
+                    organization_source_record_id = (
+                        organization_evidence[
+                            "source_record_id"
+                        ]
+                    )
+
+                    organization_payload_sha256 = (
+                        organization_evidence[
+                            "payload_sha256"
+                        ]
+                    )
+
+                    synthea_organization_id = (
+                        organization.
+                        synthea_organization_id
+                    )
+
+                    organization_name = (
+                        organization.
+                        organization_name
+                    )
+
+                    providers_with_organization += 1
+
+                    organization_ids_used.add(
+                        synthea_organization_id
+                    )
+
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM ingest.promote_synthea_provider_v1(
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    );
+                    """,
+                    (
+                        promotion_run_id,
+                        source_record[
+                            "source_record_id"
+                        ],
+                        provider_payload_sha256,
+                        provider.synthea_provider_id,
+                        provider.display_name,
+                        provider.specialty,
+                        organization_source_record_id,
+                        organization_payload_sha256,
+                        synthea_organization_id,
+                        organization_name,
+                    ),
+                )
+
+                result = cursor.fetchone()
+
+                if result is None:
+                    raise RuntimeError(
+                        "Controlled provider "
+                        "promotion returned no result"
+                    )
+
+                records_seen += 1
+
+                if result["provider_created"]:
+                    records_created += 1
+                else:
+                    records_existing += 1
+
+                lineage_edges_created += result[
+                    "lineage_edges_created"
+                ]
+
+            if (
+                records_seen
+                != expected_provider_rows
+            ):
+                raise RuntimeError(
+                    "Canonical provider row count "
+                    "does not match providers.csv: "
+                    f"expected="
+                    f"{expected_provider_rows}, "
+                    f"actual={records_seen}"
+                )
+
+            metrics = {
+                "mapping_name":
+                    PROVIDER_MAPPING_NAME,
+                "mapping_version":
+                    PROVIDER_MAPPING_VERSION,
+                "source_artifacts": [
+                    PROVIDER_SOURCE_PATH,
+                    ORGANIZATION_SOURCE_PATH,
+                ],
+                "dataset_release_id": str(
+                    dataset_release_id
+                ),
+                "organizations_verified":
+                    expected_organization_rows,
+                "providers_with_organization":
+                    providers_with_organization,
+                "distinct_organizations_used":
+                    len(organization_ids_used),
+                "lineage_edges_created":
+                    lineage_edges_created,
+                "gender_mapped": False,
+                "provider_address_mapped":
+                    False,
+                "source_aggregate_counters_mapped":
+                    False,
+                "raw_identifier_values_logged":
+                    False,
+            }
+
+            cursor.execute(
+                """
+                SELECT ingest.complete_canonical_promotion(
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    0,
+                    0,
+                    %s
+                ) AS canonical_promotion_run_id;
+                """,
+                (
+                    promotion_run_id,
+                    records_seen,
+                    records_created,
+                    records_existing,
+                    Jsonb(metrics),
+                ),
+            )
+
+            completed = cursor.fetchone()
+
+            if completed is None:
+                raise RuntimeError(
+                    "Provider promotion completion "
+                    "returned no result"
+                )
+
+            completed_event_id = (
+                _write_system_event(
+                    cursor,
+                    event_type=(
+                        "canonical."
+                        "provider_promotion_completed"
+                    ),
+                    outcome="success",
+                    message=(
+                        "Janus Synthea provider "
+                        "canonical promotion completed"
+                    ),
+                    metadata={
+                        "canonical_promotion_run_id":
+                            str(promotion_run_id),
+                        "import_batch_id":
+                            str(import_batch_id),
+                        "records_seen":
+                            records_seen,
+                        "records_created":
+                            records_created,
+                        "records_existing":
+                            records_existing,
+                        "providers_with_organization":
+                            providers_with_organization,
+                        "distinct_organizations_used":
+                            len(
+                                organization_ids_used
+                            ),
+                        "lineage_edges_created":
+                            lineage_edges_created,
+                    },
+                )
+            )
+
+        return {
+            "canonical_promotion_run_id":
+                promotion_run_id,
+            "import_batch_id":
+                import_batch_id,
+            "dataset_release_id":
+                dataset_release_id,
+            "release_label":
+                preflight["release"][
+                    "release_label"
+                ],
+            "mapping_name":
+                PROVIDER_MAPPING_NAME,
+            "mapping_version":
+                PROVIDER_MAPPING_VERSION,
+            "records_seen":
+                records_seen,
+            "records_created":
+                records_created,
+            "records_existing":
+                records_existing,
+            "records_failed":
+                0,
+            "providers_with_organization":
+                providers_with_organization,
+            "distinct_organizations_used":
+                len(organization_ids_used),
+            "lineage_edges_created":
+                lineage_edges_created,
+            "started_system_event_id":
+                promotion["system_event_id"],
+            "completed_system_event_id":
+                completed_event_id,
+            "import_correlation_id":
+                batch["correlation_id"],
+        }
+
+    except Exception as error:
+        try:
+            _fail_provider_promotion(
+                settings,
+                canonical_promotion_run_id=(
+                    promotion_run_id
+                ),
+                import_batch_id=(
+                    import_batch_id
+                ),
                 error=error,
             )
         except PsycopgError as fail_error:
