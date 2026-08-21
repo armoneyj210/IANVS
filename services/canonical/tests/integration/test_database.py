@@ -155,6 +155,37 @@ def test_canonical_permission_boundary() -> None:
         is False
     )
 
+def test_encounter_identifier_is_allowed_lineage_target() -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        cursor.execute(
+            """
+            SELECT
+                pg_get_constraintdef(
+                    c.oid,
+                    TRUE
+                ) AS constraint_definition
+            FROM pg_catalog.pg_constraint c
+            WHERE c.conrelid =
+                  'ingest.record_lineage'::regclass
+              AND c.conname =
+                  'record_lineage_target_table_check';
+            """
+        )
+
+        constraint = cursor.fetchone()
+
+    assert constraint is not None
+
+    assert (
+        "encounter_identifier"
+        in constraint["constraint_definition"]
+    )
 
 def test_direct_clinical_read_is_denied() -> None:
     get_settings.cache_clear()
