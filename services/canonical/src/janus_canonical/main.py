@@ -10,6 +10,7 @@ from janus_etl.dataset_descriptor import (
 from janus_canonical.config import get_settings
 from janus_canonical.db import health_check
 from janus_canonical.promotion_runtime import (
+    promote_encounters,
     promote_patients,
     promote_providers,
 )
@@ -82,7 +83,33 @@ def build_parser() -> argparse.ArgumentParser:
         type=UUID,
         help="Completed governed import batch UUID",
     )
+
+    encounter_parser = subparsers.add_parser(
+        "promote-encounters",
+        help=(
+            "Promote quality-certified Synthea "
+            "encounters into canonical clinical state"
+        ),
+    )
+
+    encounter_parser.add_argument(
+        "descriptor",
+        type=Path,
+        help=(
+            "Path to Janus governed dataset "
+            "descriptor JSON"
+        ),
+    )
+
+    encounter_parser.add_argument(
+        "--batch",
+        required=True,
+        type=UUID,
+        help="Completed governed import batch UUID",
+    )
     return parser
+
+
 
 
 def run_health() -> None:
@@ -255,6 +282,91 @@ def run_promote_providers(
         f"{result['completed_system_event_id']}"
     )
 
+def run_promote_encounters(
+    descriptor_path: Path,
+    import_batch_id: UUID,
+) -> None:
+    settings = get_settings()
+
+    descriptor = load_dataset_descriptor(
+        descriptor_path
+    )
+
+    print("JANUS CANONICAL ENCOUNTER PROMOTION")
+    print("-----------------------------------")
+    print(
+        f"Environment:  {settings.janus_env}"
+    )
+    print(
+        f"Release:      "
+        f"{descriptor.release.release_label}"
+    )
+    print(
+        f"Import Batch: {import_batch_id}"
+    )
+    print()
+
+    result = promote_encounters(
+        settings,
+        descriptor,
+        import_batch_id=import_batch_id,
+    )
+
+    print("Canonical Encounter promotion completed.")
+    print(
+        f"Promotion Run:       "
+        f"{result['canonical_promotion_run_id']}"
+    )
+    print(
+        f"Mapping:             "
+        f"{result['mapping_name']} "
+        f"v{result['mapping_version']}"
+    )
+    print(
+        f"Records Seen:        "
+        f"{result['records_seen']}"
+    )
+    print(
+        f"Encounters Created:  "
+        f"{result['records_created']}"
+    )
+    print(
+        f"Encounters Existing: "
+        f"{result['records_existing']}"
+    )
+    print(
+        f"Records Failed:      "
+        f"{result['records_failed']}"
+    )
+    print(
+        f"Identifiers Created: "
+        f"{result['identifiers_created']}"
+    )
+    print(
+        f"With Provider:       "
+        f"{result['encounters_with_provider']}"
+    )
+    print(
+        f"Without Provider:    "
+        f"{result['encounters_without_provider']}"
+    )
+    print(
+        f"With Reason:         "
+        f"{result['encounters_with_reason']}"
+    )
+    print(
+        f"Without Reason:      "
+        f"{result['encounters_without_reason']}"
+    )
+    print(
+        f"Lineage Edges:       "
+        f"{result['lineage_edges_created']}"
+    )
+    print(
+        f"Completed Event:     "
+        f"{result['completed_system_event_id']}"
+    )
+
 def main(
     argv: Sequence[str] | None = None,
 ) -> None:
@@ -274,6 +386,13 @@ def main(
 
     if args.command == "promote-providers":
         run_promote_providers(
+            args.descriptor,
+            args.batch,
+        )
+        return
+
+    if args.command == "promote-encounters":
+        run_promote_encounters(
             args.descriptor,
             args.batch,
         )

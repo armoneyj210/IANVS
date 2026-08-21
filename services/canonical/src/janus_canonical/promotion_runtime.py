@@ -26,6 +26,16 @@ from janus_canonical.db import (
     _set_environment,
     open_connection,
 )
+from janus_canonical.encounter_mapping import (
+    ENCOUNTER_SOURCE_PATH,
+    map_synthea_encounter,
+)
+from janus_canonical.encounter_mapping import (
+    MAPPING_NAME as ENCOUNTER_MAPPING_NAME,
+)
+from janus_canonical.encounter_mapping import (
+    MAPPING_VERSION as ENCOUNTER_MAPPING_VERSION,
+)
 from janus_canonical.patient_mapping import (
     MAPPING_NAME,
     MAPPING_VERSION,
@@ -1534,6 +1544,736 @@ def promote_providers(
     except Exception as error:
         try:
             _fail_provider_promotion(
+                settings,
+                canonical_promotion_run_id=(
+                    promotion_run_id
+                ),
+                import_batch_id=(
+                    import_batch_id
+                ),
+                error=error,
+            )
+        except PsycopgError as fail_error:
+            error.add_note(
+                "Canonical fail-closed recording "
+                "also failed: "
+                f"{type(fail_error).__name__}: "
+                f"{fail_error}"
+            )
+
+        raise
+
+def _resolve_encounter_source_file(
+    preflight: dict[str, Any],
+) -> dict[str, Any]:
+    matches = [
+        source_file
+        for source_file in preflight[
+            "importable_source_files"
+        ]
+        if source_file["relative_path"]
+        == ENCOUNTER_SOURCE_PATH
+    ]
+
+    if len(matches) != 1:
+        raise RuntimeError(
+            "Verified release must contain exactly one "
+            f"{ENCOUNTER_SOURCE_PATH} artifact"
+        )
+
+    return matches[0]
+
+
+def _load_encounter_source_records(
+    settings: CanonicalSettings,
+    *,
+    import_batch_id: UUID,
+    source_file_id: UUID,
+) -> dict[int, dict[str, Any]]:
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT
+                source_record_id,
+                row_number,
+                source_record_key,
+                resource_type,
+                record_locator,
+                payload_sha256,
+                record_status
+            FROM ingest.source_record
+            WHERE import_batch_id = %s
+              AND source_file_id = %s
+            ORDER BY row_number;
+            """,
+            (
+                import_batch_id,
+                source_file_id,
+            ),
+        )
+
+        rows = cursor.fetchall()
+
+    result: dict[int, dict[str, Any]] = {}
+
+    for row in rows:
+        row_number = row["row_number"]
+
+        if row_number is None:
+            raise RuntimeError(
+                "Encounter source record is missing "
+                "its row number"
+            )
+
+        if row_number in result:
+            raise RuntimeError(
+                "Duplicate Encounter source row "
+                f"number: {row_number}"
+            )
+
+        result[row_number] = row
+
+    return result
+
+
+def _verified_encounter_payload_sha256(
+    *,
+    row: dict[str, str | None],
+    source_record: dict[str, Any],
+    row_number: int,
+) -> str:
+    if (
+        source_record["record_status"]
+        != "accepted"
+    ):
+        raise RuntimeError(
+            "Encounter source record is not "
+            "accepted: "
+            f"row={row_number}, "
+            f"status="
+            f"{source_record['record_status']}"
+        )
+
+    if (
+        source_record["resource_type"]
+        != "encounters"
+    ):
+        raise RuntimeError(
+            "Encounter governed source record has "
+            "unexpected resource type: "
+            f"row={row_number}, "
+            f"resource_type="
+            f"{source_record['resource_type']}"
+        )
+
+    payload = _canonical_row_payload(row)
+
+    payload_sha256 = hashlib.sha256(
+        payload
+    ).hexdigest()
+
+    if (
+        payload_sha256
+        != source_record["payload_sha256"]
+    ):
+        raise RuntimeError(
+            "Physical Encounter source row does not "
+            "match imported payload hash: "
+            f"row={row_number}"
+        )
+
+    return payload_sha256
+
+
+def _begin_encounter_promotion(
+    settings: CanonicalSettings,
+    *,
+    import_batch_id: UUID,
+) -> dict[str, Any]:
+    service_version = _service_version()
+    git_commit_sha = _git_commit_sha()
+
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT ingest.begin_canonical_promotion(
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            ) AS canonical_promotion_run_id;
+            """,
+            (
+                import_batch_id,
+                ENCOUNTER_MAPPING_NAME,
+                ENCOUNTER_MAPPING_VERSION,
+                service_version,
+                git_commit_sha,
+            ),
+        )
+
+        promotion = cursor.fetchone()
+
+        if promotion is None:
+            raise RuntimeError(
+                "Encounter promotion start returned "
+                "no result"
+            )
+
+        promotion_run_id = promotion[
+            "canonical_promotion_run_id"
+        ]
+
+        event_id = _write_system_event(
+            cursor,
+            event_type=(
+                "canonical."
+                "encounter_promotion_started"
+            ),
+            outcome="success",
+            message=(
+                "Janus Synthea Encounter canonical "
+                "promotion started"
+            ),
+            metadata={
+                "canonical_promotion_run_id": str(
+                    promotion_run_id
+                ),
+                "import_batch_id": str(
+                    import_batch_id
+                ),
+                "mapping_name":
+                    ENCOUNTER_MAPPING_NAME,
+                "mapping_version":
+                    ENCOUNTER_MAPPING_VERSION,
+                "service_version":
+                    service_version,
+                "git_commit_sha":
+                    git_commit_sha,
+            },
+        )
+
+    return {
+        "canonical_promotion_run_id":
+            promotion_run_id,
+        "service_version":
+            service_version,
+        "git_commit_sha":
+            git_commit_sha,
+        "system_event_id":
+            event_id,
+    }
+
+
+def _fail_encounter_promotion(
+    settings: CanonicalSettings,
+    *,
+    canonical_promotion_run_id: UUID,
+    import_batch_id: UUID,
+    error: Exception,
+) -> None:
+    error_summary = {
+        "error_type": type(error).__name__,
+        "message": str(error)[:2000],
+    }
+
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT ingest.fail_canonical_promotion(
+                %s,
+                %s,
+                %s
+            ) AS canonical_promotion_run_id;
+            """,
+            (
+                canonical_promotion_run_id,
+                Jsonb(error_summary),
+                Jsonb(
+                    {
+                        "mapping_name":
+                            ENCOUNTER_MAPPING_NAME,
+                        "mapping_version":
+                            ENCOUNTER_MAPPING_VERSION,
+                    }
+                ),
+            ),
+        )
+
+        _write_system_event(
+            cursor,
+            event_type=(
+                "canonical."
+                "encounter_promotion_failed"
+            ),
+            outcome="failure",
+            severity="error",
+            message=(
+                "Janus Synthea Encounter canonical "
+                "promotion failed"
+            ),
+            metadata={
+                "canonical_promotion_run_id": str(
+                    canonical_promotion_run_id
+                ),
+                "import_batch_id": str(
+                    import_batch_id
+                ),
+                "mapping_name":
+                    ENCOUNTER_MAPPING_NAME,
+                "mapping_version":
+                    ENCOUNTER_MAPPING_VERSION,
+                "error_type":
+                    error_summary["error_type"],
+            },
+        )
+
+
+def promote_encounters(
+    settings: CanonicalSettings,
+    descriptor: GovernedDatasetDescriptor,
+    *,
+    import_batch_id: UUID,
+) -> dict[str, Any]:
+    # Re-verify the governed release before consuming the
+    # physical encounters.csv artifact.
+    preflight = preflight_release(
+        settings,
+        descriptor,
+    )
+
+    dataset_release_id = preflight["release"][
+        "dataset_release_id"
+    ]
+
+    batch = _resolve_import_batch(
+        settings,
+        import_batch_id=import_batch_id,
+        dataset_release_id=dataset_release_id,
+    )
+
+    encounter_source_file = (
+        _resolve_encounter_source_file(
+            preflight
+        )
+    )
+
+    expected_encounter_rows = (
+        encounter_source_file["row_count"]
+    )
+
+    if expected_encounter_rows is None:
+        raise RuntimeError(
+            "Registered encounters.csv row count "
+            "is missing"
+        )
+
+    source_records = (
+        _load_encounter_source_records(
+            settings,
+            import_batch_id=import_batch_id,
+            source_file_id=(
+                encounter_source_file[
+                    "source_file_id"
+                ]
+            ),
+        )
+    )
+
+    if (
+        len(source_records)
+        != expected_encounter_rows
+    ):
+        raise RuntimeError(
+            "Encounter source-record count does not "
+            "match verified encounters.csv row count: "
+            f"source_records={len(source_records)}, "
+            f"verified_rows={expected_encounter_rows}"
+        )
+
+    promotion = _begin_encounter_promotion(
+        settings,
+        import_batch_id=import_batch_id,
+    )
+
+    promotion_run_id = promotion[
+        "canonical_promotion_run_id"
+    ]
+
+    records_seen = 0
+    records_created = 0
+    records_existing = 0
+
+    identifiers_created = 0
+    lineage_edges_created = 0
+
+    encounters_with_provider = 0
+    encounters_without_provider = 0
+
+    encounters_with_reason = 0
+    encounters_without_reason = 0
+
+    encounter_file_path = (
+        preflight["raw_directory"]
+        / ENCOUNTER_SOURCE_PATH
+    )
+
+    try:
+        with (
+            open_connection(settings) as conn,
+            conn.cursor() as cursor,
+            encounter_file_path.open(
+                "r",
+                encoding="utf-8-sig",
+                newline="",
+            ) as handle,
+        ):
+            _set_environment(cursor, settings)
+
+            reader = csv.DictReader(handle)
+
+            if reader.fieldnames is None:
+                raise RuntimeError(
+                    "encounters.csv has no header"
+                )
+
+            for row_number, row in enumerate(
+                reader,
+                start=1,
+            ):
+                source_record = (
+                    source_records.get(
+                        row_number
+                    )
+                )
+
+                if source_record is None:
+                    raise RuntimeError(
+                        "Verified encounters.csv row "
+                        "has no matching governed "
+                        "source record: "
+                        f"row={row_number}"
+                    )
+
+                payload_sha256 = (
+                    _verified_encounter_payload_sha256(
+                        row=row,
+                        source_record=source_record,
+                        row_number=row_number,
+                    )
+                )
+
+                encounter = (
+                    map_synthea_encounter(row)
+                )
+
+                if (
+                    encounter.synthea_provider_id
+                    is None
+                ):
+                    encounters_without_provider += 1
+                else:
+                    encounters_with_provider += 1
+
+                if encounter.reason is None:
+                    encounters_without_reason += 1
+                else:
+                    encounters_with_reason += 1
+
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM ingest.promote_synthea_encounter_v1(
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    );
+                    """,
+                    (
+                        promotion_run_id,
+                        source_record[
+                            "source_record_id"
+                        ],
+                        payload_sha256,
+                        encounter.
+                        synthea_encounter_id,
+                        encounter.
+                        synthea_patient_id,
+                        encounter.
+                        synthea_provider_id,
+                        encounter.start_at,
+                        encounter.end_at,
+                        encounter.encounter_type,
+                        encounter.reason,
+                    ),
+                )
+
+                result = cursor.fetchone()
+
+                if result is None:
+                    raise RuntimeError(
+                        "Controlled Encounter "
+                        "promotion returned no result"
+                    )
+
+                records_seen += 1
+
+                if result["encounter_created"]:
+                    records_created += 1
+                else:
+                    records_existing += 1
+
+                if result["identifier_created"]:
+                    identifiers_created += 1
+
+                lineage_edges_created += result[
+                    "lineage_edges_created"
+                ]
+
+            if (
+                records_seen
+                != expected_encounter_rows
+            ):
+                raise RuntimeError(
+                    "Canonical Encounter row count "
+                    "does not match encounters.csv: "
+                    f"expected="
+                    f"{expected_encounter_rows}, "
+                    f"actual={records_seen}"
+                )
+
+            if (
+                records_created
+                + records_existing
+                != records_seen
+            ):
+                raise RuntimeError(
+                    "Encounter promotion counters "
+                    "do not reconcile"
+                )
+
+            metrics = {
+                "mapping_name":
+                    ENCOUNTER_MAPPING_NAME,
+
+                "mapping_version":
+                    ENCOUNTER_MAPPING_VERSION,
+
+                "source_artifact":
+                    ENCOUNTER_SOURCE_PATH,
+
+                "dataset_release_id":
+                    str(dataset_release_id),
+
+                "identifiers_created":
+                    identifiers_created,
+
+                "lineage_edges_created":
+                    lineage_edges_created,
+
+                "encounters_with_provider":
+                    encounters_with_provider,
+
+                "encounters_without_provider":
+                    encounters_without_provider,
+
+                "encounters_with_reason":
+                    encounters_with_reason,
+
+                "encounters_without_reason":
+                    encounters_without_reason,
+
+                "patient_dependency_certification_required":
+                    True,
+
+                "provider_dependency_certification_required":
+                    True,
+
+                "status_mapped":
+                    False,
+
+                "reason_source_field":
+                    "REASONDESCRIPTION",
+
+                "description_mapped":
+                    False,
+
+                "code_mapped":
+                    False,
+
+                "organization_mapped":
+                    False,
+
+                "payer_mapped":
+                    False,
+
+                "financial_fields_mapped":
+                    False,
+
+                "raw_identifier_values_logged":
+                    False,
+            }
+
+            cursor.execute(
+                """
+                SELECT ingest.complete_canonical_promotion(
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    0,
+                    %s,
+                    %s
+                ) AS canonical_promotion_run_id;
+                """,
+                (
+                    promotion_run_id,
+                    records_seen,
+                    records_created,
+                    records_existing,
+                    identifiers_created,
+                    Jsonb(metrics),
+                ),
+            )
+
+            completed = cursor.fetchone()
+
+            if completed is None:
+                raise RuntimeError(
+                    "Encounter promotion completion "
+                    "returned no result"
+                )
+
+            completed_event_id = (
+                _write_system_event(
+                    cursor,
+                    event_type=(
+                        "canonical."
+                        "encounter_promotion_completed"
+                    ),
+                    outcome="success",
+                    message=(
+                        "Janus Synthea Encounter "
+                        "canonical promotion completed"
+                    ),
+                    metadata={
+                        "canonical_promotion_run_id":
+                            str(promotion_run_id),
+
+                        "import_batch_id":
+                            str(import_batch_id),
+
+                        "records_seen":
+                            records_seen,
+
+                        "records_created":
+                            records_created,
+
+                        "records_existing":
+                            records_existing,
+
+                        "identifiers_created":
+                            identifiers_created,
+
+                        "lineage_edges_created":
+                            lineage_edges_created,
+
+                        "encounters_with_provider":
+                            encounters_with_provider,
+
+                        "encounters_with_reason":
+                            encounters_with_reason,
+                    },
+                )
+            )
+
+        return {
+            "canonical_promotion_run_id":
+                promotion_run_id,
+
+            "import_batch_id":
+                import_batch_id,
+
+            "dataset_release_id":
+                dataset_release_id,
+
+            "release_label":
+                preflight["release"][
+                    "release_label"
+                ],
+
+            "mapping_name":
+                ENCOUNTER_MAPPING_NAME,
+
+            "mapping_version":
+                ENCOUNTER_MAPPING_VERSION,
+
+            "records_seen":
+                records_seen,
+
+            "records_created":
+                records_created,
+
+            "records_existing":
+                records_existing,
+
+            "records_failed":
+                0,
+
+            "identifiers_created":
+                identifiers_created,
+
+            "lineage_edges_created":
+                lineage_edges_created,
+
+            "encounters_with_provider":
+                encounters_with_provider,
+
+            "encounters_without_provider":
+                encounters_without_provider,
+
+            "encounters_with_reason":
+                encounters_with_reason,
+
+            "encounters_without_reason":
+                encounters_without_reason,
+
+            "started_system_event_id":
+                promotion["system_event_id"],
+
+            "completed_system_event_id":
+                completed_event_id,
+
+            "import_correlation_id":
+                batch["correlation_id"],
+        }
+
+    except Exception as error:
+        try:
+            _fail_encounter_promotion(
                 settings,
                 canonical_promotion_run_id=(
                     promotion_run_id
