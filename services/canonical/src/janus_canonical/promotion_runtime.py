@@ -18,6 +18,16 @@ from janus_etl.import_runtime import (
 from psycopg import Error as PsycopgError
 from psycopg.types.json import Jsonb
 
+from janus_canonical.condition_mapping import (
+    CONDITION_SOURCE_PATH,
+    map_synthea_condition,
+)
+from janus_canonical.condition_mapping import (
+    MAPPING_NAME as CONDITION_MAPPING_NAME,
+)
+from janus_canonical.condition_mapping import (
+    MAPPING_VERSION as CONDITION_MAPPING_VERSION,
+)
 from janus_canonical.config import (
     REPO_ROOT,
     CanonicalSettings,
@@ -2274,6 +2284,702 @@ def promote_encounters(
     except Exception as error:
         try:
             _fail_encounter_promotion(
+                settings,
+                canonical_promotion_run_id=(
+                    promotion_run_id
+                ),
+                import_batch_id=(
+                    import_batch_id
+                ),
+                error=error,
+            )
+        except PsycopgError as fail_error:
+            error.add_note(
+                "Canonical fail-closed recording "
+                "also failed: "
+                f"{type(fail_error).__name__}: "
+                f"{fail_error}"
+            )
+
+        raise
+
+def _resolve_condition_source_file(
+    preflight: dict[str, Any],
+) -> dict[str, Any]:
+    matches = [
+        source_file
+        for source_file in preflight[
+            "importable_source_files"
+        ]
+        if source_file["relative_path"]
+        == CONDITION_SOURCE_PATH
+    ]
+
+    if len(matches) != 1:
+        raise RuntimeError(
+            "Verified release must contain exactly one "
+            f"{CONDITION_SOURCE_PATH} artifact"
+        )
+
+    return matches[0]
+
+
+def _load_condition_source_records(
+    settings: CanonicalSettings,
+    *,
+    import_batch_id: UUID,
+    source_file_id: UUID,
+) -> dict[int, dict[str, Any]]:
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT
+                source_record_id,
+                row_number,
+                source_record_key,
+                resource_type,
+                record_locator,
+                payload_sha256,
+                record_status
+            FROM ingest.source_record
+            WHERE import_batch_id = %s
+              AND source_file_id = %s
+            ORDER BY row_number;
+            """,
+            (
+                import_batch_id,
+                source_file_id,
+            ),
+        )
+
+        rows = cursor.fetchall()
+
+    result: dict[int, dict[str, Any]] = {}
+
+    for row in rows:
+        row_number = row["row_number"]
+
+        if row_number is None:
+            raise RuntimeError(
+                "Condition source record is missing "
+                "its row number"
+            )
+
+        if row_number in result:
+            raise RuntimeError(
+                "Duplicate Condition source row "
+                f"number: {row_number}"
+            )
+
+        result[row_number] = row
+
+    return result
+
+
+def _verified_condition_payload_sha256(
+    *,
+    row: dict[str, str | None],
+    source_record: dict[str, Any],
+    row_number: int,
+) -> str:
+    if (
+        source_record["record_status"]
+        != "accepted"
+    ):
+        raise RuntimeError(
+            "Condition source record is not "
+            "accepted: "
+            f"row={row_number}, "
+            f"status="
+            f"{source_record['record_status']}"
+        )
+
+    if (
+        source_record["resource_type"]
+        != "conditions"
+    ):
+        raise RuntimeError(
+            "Condition governed source record has "
+            "unexpected resource type: "
+            f"row={row_number}, "
+            f"resource_type="
+            f"{source_record['resource_type']}"
+        )
+
+    payload = _canonical_row_payload(row)
+
+    payload_sha256 = hashlib.sha256(
+        payload
+    ).hexdigest()
+
+    if (
+        payload_sha256
+        != source_record["payload_sha256"]
+    ):
+        raise RuntimeError(
+            "Physical Condition source row does not "
+            "match imported payload hash: "
+            f"row={row_number}"
+        )
+
+    return payload_sha256
+
+
+def _begin_condition_promotion(
+    settings: CanonicalSettings,
+    *,
+    import_batch_id: UUID,
+) -> dict[str, Any]:
+    service_version = _service_version()
+    git_commit_sha = _git_commit_sha()
+
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT ingest.begin_canonical_promotion(
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            ) AS canonical_promotion_run_id;
+            """,
+            (
+                import_batch_id,
+                CONDITION_MAPPING_NAME,
+                CONDITION_MAPPING_VERSION,
+                service_version,
+                git_commit_sha,
+            ),
+        )
+
+        promotion = cursor.fetchone()
+
+        if promotion is None:
+            raise RuntimeError(
+                "Condition promotion start returned "
+                "no result"
+            )
+
+        promotion_run_id = promotion[
+            "canonical_promotion_run_id"
+        ]
+
+        event_id = _write_system_event(
+            cursor,
+            event_type=(
+                "canonical."
+                "condition_promotion_started"
+            ),
+            outcome="success",
+            message=(
+                "Janus Synthea Condition canonical "
+                "promotion started"
+            ),
+            metadata={
+                "canonical_promotion_run_id": str(
+                    promotion_run_id
+                ),
+                "import_batch_id": str(
+                    import_batch_id
+                ),
+                "mapping_name":
+                    CONDITION_MAPPING_NAME,
+                "mapping_version":
+                    CONDITION_MAPPING_VERSION,
+                "service_version":
+                    service_version,
+                "git_commit_sha":
+                    git_commit_sha,
+            },
+        )
+
+    return {
+        "canonical_promotion_run_id":
+            promotion_run_id,
+        "service_version":
+            service_version,
+        "git_commit_sha":
+            git_commit_sha,
+        "system_event_id":
+            event_id,
+    }
+
+
+def _fail_condition_promotion(
+    settings: CanonicalSettings,
+    *,
+    canonical_promotion_run_id: UUID,
+    import_batch_id: UUID,
+    error: Exception,
+) -> None:
+    error_summary = {
+        "error_type": type(error).__name__,
+        "message": str(error)[:2000],
+    }
+
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT ingest.fail_canonical_promotion(
+                %s,
+                %s,
+                %s
+            ) AS canonical_promotion_run_id;
+            """,
+            (
+                canonical_promotion_run_id,
+                Jsonb(error_summary),
+                Jsonb(
+                    {
+                        "mapping_name":
+                            CONDITION_MAPPING_NAME,
+                        "mapping_version":
+                            CONDITION_MAPPING_VERSION,
+                    }
+                ),
+            ),
+        )
+
+        _write_system_event(
+            cursor,
+            event_type=(
+                "canonical."
+                "condition_promotion_failed"
+            ),
+            outcome="failure",
+            severity="error",
+            message=(
+                "Janus Synthea Condition canonical "
+                "promotion failed"
+            ),
+            metadata={
+                "canonical_promotion_run_id": str(
+                    canonical_promotion_run_id
+                ),
+                "import_batch_id": str(
+                    import_batch_id
+                ),
+                "mapping_name":
+                    CONDITION_MAPPING_NAME,
+                "mapping_version":
+                    CONDITION_MAPPING_VERSION,
+                "error_type":
+                    error_summary["error_type"],
+            },
+        )
+
+
+def promote_conditions(
+    settings: CanonicalSettings,
+    descriptor: GovernedDatasetDescriptor,
+    *,
+    import_batch_id: UUID,
+) -> dict[str, Any]:
+    # Re-verify the governed release before consuming the
+    # physical conditions.csv artifact.
+    preflight = preflight_release(
+        settings,
+        descriptor,
+    )
+
+    dataset_release_id = preflight["release"][
+        "dataset_release_id"
+    ]
+
+    batch = _resolve_import_batch(
+        settings,
+        import_batch_id=import_batch_id,
+        dataset_release_id=dataset_release_id,
+    )
+
+    condition_source_file = (
+        _resolve_condition_source_file(
+            preflight
+        )
+    )
+
+    expected_condition_rows = (
+        condition_source_file["row_count"]
+    )
+
+    if expected_condition_rows is None:
+        raise RuntimeError(
+            "Registered conditions.csv row count "
+            "is missing"
+        )
+
+    source_records = (
+        _load_condition_source_records(
+            settings,
+            import_batch_id=import_batch_id,
+            source_file_id=(
+                condition_source_file[
+                    "source_file_id"
+                ]
+            ),
+        )
+    )
+
+    if (
+        len(source_records)
+        != expected_condition_rows
+    ):
+        raise RuntimeError(
+            "Condition source-record count does not "
+            "match verified conditions.csv row count: "
+            f"source_records={len(source_records)}, "
+            f"verified_rows={expected_condition_rows}"
+        )
+
+    promotion = _begin_condition_promotion(
+        settings,
+        import_batch_id=import_batch_id,
+    )
+
+    promotion_run_id = promotion[
+        "canonical_promotion_run_id"
+    ]
+
+    records_seen = 0
+    records_created = 0
+    records_existing = 0
+
+    lineage_edges_created = 0
+
+    conditions_with_resolved_date = 0
+    conditions_without_resolved_date = 0
+
+    condition_file_path = (
+        preflight["raw_directory"]
+        / CONDITION_SOURCE_PATH
+    )
+
+    try:
+        with (
+            open_connection(settings) as conn,
+            conn.cursor() as cursor,
+            condition_file_path.open(
+                "r",
+                encoding="utf-8-sig",
+                newline="",
+            ) as handle,
+        ):
+            _set_environment(cursor, settings)
+
+            reader = csv.DictReader(handle)
+
+            if reader.fieldnames is None:
+                raise RuntimeError(
+                    "conditions.csv has no header"
+                )
+
+            for row_number, row in enumerate(
+                reader,
+                start=1,
+            ):
+                source_record = (
+                    source_records.get(
+                        row_number
+                    )
+                )
+
+                if source_record is None:
+                    raise RuntimeError(
+                        "Verified conditions.csv row "
+                        "has no matching governed "
+                        "source record: "
+                        f"row={row_number}"
+                    )
+
+                payload_sha256 = (
+                    _verified_condition_payload_sha256(
+                        row=row,
+                        source_record=source_record,
+                        row_number=row_number,
+                    )
+                )
+
+                condition = (
+                    map_synthea_condition(row)
+                )
+
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM ingest.promote_synthea_condition_v1(
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    );
+                    """,
+                    (
+                        promotion_run_id,
+                        source_record[
+                            "source_record_id"
+                        ],
+                        payload_sha256,
+                        condition.
+                        synthea_patient_id,
+                        condition.
+                        synthea_encounter_id,
+                        condition.onset_date,
+                        condition.resolved_date,
+                        condition.code_system,
+                        condition.code,
+                        condition.display,
+                    ),
+                )
+
+                result = cursor.fetchone()
+
+                if result is None:
+                    raise RuntimeError(
+                        "Controlled Condition "
+                        "promotion returned no result"
+                    )
+
+                records_seen += 1
+
+                if result["condition_created"]:
+                    records_created += 1
+                else:
+                    records_existing += 1
+
+                lineage_edges_created += result[
+                    "lineage_edges_created"
+                ]
+
+                if (
+                    condition.resolved_date
+                    is None
+                ):
+                    conditions_without_resolved_date += 1
+                else:
+                    conditions_with_resolved_date += 1
+
+            if (
+                records_seen
+                != expected_condition_rows
+            ):
+                raise RuntimeError(
+                    "Canonical Condition row count "
+                    "does not match conditions.csv: "
+                    f"expected="
+                    f"{expected_condition_rows}, "
+                    f"actual={records_seen}"
+                )
+
+            if (
+                records_created
+                + records_existing
+                != records_seen
+            ):
+                raise RuntimeError(
+                    "Condition promotion counters "
+                    "do not reconcile"
+                )
+
+            if (
+                conditions_with_resolved_date
+                + conditions_without_resolved_date
+                != records_seen
+            ):
+                raise RuntimeError(
+                    "Condition resolution-date counters "
+                    "do not reconcile"
+                )
+
+            metrics = {
+                "mapping_name":
+                    CONDITION_MAPPING_NAME,
+
+                "mapping_version":
+                    CONDITION_MAPPING_VERSION,
+
+                "source_artifact":
+                    CONDITION_SOURCE_PATH,
+
+                "dataset_release_id":
+                    str(dataset_release_id),
+
+                "lineage_edges_created":
+                    lineage_edges_created,
+
+                "conditions_with_resolved_date":
+                    conditions_with_resolved_date,
+
+                "conditions_without_resolved_date":
+                    conditions_without_resolved_date,
+
+                "patient_dependency_certification_required":
+                    True,
+
+                "encounter_dependency_certification_required":
+                    True,
+
+                "patient_encounter_match_required":
+                    True,
+
+                "clinical_status_mapped":
+                    False,
+
+                "external_condition_identifier":
+                    False,
+
+                "source_identity":
+                    "governed_source_record_id",
+
+                "raw_identifier_values_logged":
+                    False,
+            }
+
+            cursor.execute(
+                """
+                SELECT ingest.complete_canonical_promotion(
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    0,
+                    0,
+                    %s
+                ) AS canonical_promotion_run_id;
+                """,
+                (
+                    promotion_run_id,
+                    records_seen,
+                    records_created,
+                    records_existing,
+                    Jsonb(metrics),
+                ),
+            )
+
+            completed = cursor.fetchone()
+
+            if completed is None:
+                raise RuntimeError(
+                    "Condition promotion completion "
+                    "returned no result"
+                )
+
+            completed_event_id = (
+                _write_system_event(
+                    cursor,
+                    event_type=(
+                        "canonical."
+                        "condition_promotion_completed"
+                    ),
+                    outcome="success",
+                    message=(
+                        "Janus Synthea Condition "
+                        "canonical promotion completed"
+                    ),
+                    metadata={
+                        "canonical_promotion_run_id":
+                            str(promotion_run_id),
+
+                        "import_batch_id":
+                            str(import_batch_id),
+
+                        "records_seen":
+                            records_seen,
+
+                        "records_created":
+                            records_created,
+
+                        "records_existing":
+                            records_existing,
+
+                        "lineage_edges_created":
+                            lineage_edges_created,
+
+                        "conditions_with_resolved_date":
+                            conditions_with_resolved_date,
+
+                        "conditions_without_resolved_date":
+                            conditions_without_resolved_date,
+                    },
+                )
+            )
+
+        return {
+            "canonical_promotion_run_id":
+                promotion_run_id,
+
+            "import_batch_id":
+                import_batch_id,
+
+            "dataset_release_id":
+                dataset_release_id,
+
+            "release_label":
+                preflight["release"][
+                    "release_label"
+                ],
+
+            "mapping_name":
+                CONDITION_MAPPING_NAME,
+
+            "mapping_version":
+                CONDITION_MAPPING_VERSION,
+
+            "records_seen":
+                records_seen,
+
+            "records_created":
+                records_created,
+
+            "records_existing":
+                records_existing,
+
+            "records_failed":
+                0,
+
+            "lineage_edges_created":
+                lineage_edges_created,
+
+            "conditions_with_resolved_date":
+                conditions_with_resolved_date,
+
+            "conditions_without_resolved_date":
+                conditions_without_resolved_date,
+
+            "started_system_event_id":
+                promotion["system_event_id"],
+
+            "completed_system_event_id":
+                completed_event_id,
+
+            "import_correlation_id":
+                batch["correlation_id"],
+        }
+
+    except Exception as error:
+        try:
+            _fail_condition_promotion(
                 settings,
                 canonical_promotion_run_id=(
                     promotion_run_id
