@@ -46,6 +46,16 @@ from janus_canonical.encounter_mapping import (
 from janus_canonical.encounter_mapping import (
     MAPPING_VERSION as ENCOUNTER_MAPPING_VERSION,
 )
+from janus_canonical.medication_mapping import (
+    MAPPING_NAME as MEDICATION_MAPPING_NAME,
+)
+from janus_canonical.medication_mapping import (
+    MAPPING_VERSION as MEDICATION_MAPPING_VERSION,
+)
+from janus_canonical.medication_mapping import (
+    MEDICATION_SOURCE_PATH,
+    map_synthea_medication,
+)
 from janus_canonical.patient_mapping import (
     MAPPING_NAME,
     MAPPING_VERSION,
@@ -2980,6 +2990,715 @@ def promote_conditions(
     except Exception as error:
         try:
             _fail_condition_promotion(
+                settings,
+                canonical_promotion_run_id=(
+                    promotion_run_id
+                ),
+                import_batch_id=(
+                    import_batch_id
+                ),
+                error=error,
+            )
+        except PsycopgError as fail_error:
+            error.add_note(
+                "Canonical fail-closed recording "
+                "also failed: "
+                f"{type(fail_error).__name__}: "
+                f"{fail_error}"
+            )
+
+        raise
+
+def _resolve_medication_source_file(
+    preflight: dict[str, Any],
+) -> dict[str, Any]:
+    matches = [
+        source_file
+        for source_file in preflight[
+            "importable_source_files"
+        ]
+        if source_file["relative_path"]
+        == MEDICATION_SOURCE_PATH
+    ]
+
+    if len(matches) != 1:
+        raise RuntimeError(
+            "Verified release must contain exactly one "
+            f"{MEDICATION_SOURCE_PATH} artifact"
+        )
+
+    return matches[0]
+
+
+def _load_medication_source_records(
+    settings: CanonicalSettings,
+    *,
+    import_batch_id: UUID,
+    source_file_id: UUID,
+) -> dict[int, dict[str, Any]]:
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT
+                source_record_id,
+                row_number,
+                source_record_key,
+                resource_type,
+                record_locator,
+                payload_sha256,
+                record_status
+            FROM ingest.source_record
+            WHERE import_batch_id = %s
+              AND source_file_id = %s
+            ORDER BY row_number;
+            """,
+            (
+                import_batch_id,
+                source_file_id,
+            ),
+        )
+
+        rows = cursor.fetchall()
+
+    result: dict[int, dict[str, Any]] = {}
+
+    for row in rows:
+        row_number = row["row_number"]
+
+        if row_number is None:
+            raise RuntimeError(
+                "Medication source record is missing "
+                "its row number"
+            )
+
+        if row_number in result:
+            raise RuntimeError(
+                "Duplicate Medication source row "
+                f"number: {row_number}"
+            )
+
+        result[row_number] = row
+
+    return result
+
+
+def _verified_medication_payload_sha256(
+    *,
+    row: dict[str, str | None],
+    source_record: dict[str, Any],
+    row_number: int,
+) -> str:
+    if (
+        source_record["record_status"]
+        != "accepted"
+    ):
+        raise RuntimeError(
+            "Medication source record is not "
+            "accepted: "
+            f"row={row_number}, "
+            f"status="
+            f"{source_record['record_status']}"
+        )
+
+    if (
+        source_record["resource_type"]
+        != "medications"
+    ):
+        raise RuntimeError(
+            "Medication governed source record has "
+            "unexpected resource type: "
+            f"row={row_number}, "
+            f"resource_type="
+            f"{source_record['resource_type']}"
+        )
+
+    payload = _canonical_row_payload(row)
+
+    payload_sha256 = hashlib.sha256(
+        payload
+    ).hexdigest()
+
+    if (
+        payload_sha256
+        != source_record["payload_sha256"]
+    ):
+        raise RuntimeError(
+            "Physical Medication source row does not "
+            "match imported payload hash: "
+            f"row={row_number}"
+        )
+
+    return payload_sha256
+
+
+def _begin_medication_promotion(
+    settings: CanonicalSettings,
+    *,
+    import_batch_id: UUID,
+) -> dict[str, Any]:
+    service_version = _service_version()
+    git_commit_sha = _git_commit_sha()
+
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT ingest.begin_canonical_promotion(
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            ) AS canonical_promotion_run_id;
+            """,
+            (
+                import_batch_id,
+                MEDICATION_MAPPING_NAME,
+                MEDICATION_MAPPING_VERSION,
+                service_version,
+                git_commit_sha,
+            ),
+        )
+
+        promotion = cursor.fetchone()
+
+        if promotion is None:
+            raise RuntimeError(
+                "Medication promotion start returned "
+                "no result"
+            )
+
+        promotion_run_id = promotion[
+            "canonical_promotion_run_id"
+        ]
+
+        event_id = _write_system_event(
+            cursor,
+            event_type=(
+                "canonical."
+                "medication_promotion_started"
+            ),
+            outcome="success",
+            message=(
+                "Janus Synthea Medication canonical "
+                "promotion started"
+            ),
+            metadata={
+                "canonical_promotion_run_id": str(
+                    promotion_run_id
+                ),
+                "import_batch_id": str(
+                    import_batch_id
+                ),
+                "mapping_name":
+                    MEDICATION_MAPPING_NAME,
+                "mapping_version":
+                    MEDICATION_MAPPING_VERSION,
+                "service_version":
+                    service_version,
+                "git_commit_sha":
+                    git_commit_sha,
+            },
+        )
+
+    return {
+        "canonical_promotion_run_id":
+            promotion_run_id,
+        "service_version":
+            service_version,
+        "git_commit_sha":
+            git_commit_sha,
+        "system_event_id":
+            event_id,
+    }
+
+
+def _fail_medication_promotion(
+    settings: CanonicalSettings,
+    *,
+    canonical_promotion_run_id: UUID,
+    import_batch_id: UUID,
+    error: Exception,
+) -> None:
+    error_summary = {
+        "error_type": type(error).__name__,
+        "message": str(error)[:2000],
+    }
+
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT ingest.fail_canonical_promotion(
+                %s,
+                %s,
+                %s
+            ) AS canonical_promotion_run_id;
+            """,
+            (
+                canonical_promotion_run_id,
+                Jsonb(error_summary),
+                Jsonb(
+                    {
+                        "mapping_name":
+                            MEDICATION_MAPPING_NAME,
+                        "mapping_version":
+                            MEDICATION_MAPPING_VERSION,
+                    }
+                ),
+            ),
+        )
+
+        _write_system_event(
+            cursor,
+            event_type=(
+                "canonical."
+                "medication_promotion_failed"
+            ),
+            outcome="failure",
+            severity="error",
+            message=(
+                "Janus Synthea Medication canonical "
+                "promotion failed"
+            ),
+            metadata={
+                "canonical_promotion_run_id": str(
+                    canonical_promotion_run_id
+                ),
+                "import_batch_id": str(
+                    import_batch_id
+                ),
+                "mapping_name":
+                    MEDICATION_MAPPING_NAME,
+                "mapping_version":
+                    MEDICATION_MAPPING_VERSION,
+                "error_type":
+                    error_summary["error_type"],
+            },
+        )
+
+
+def promote_medications(
+    settings: CanonicalSettings,
+    descriptor: GovernedDatasetDescriptor,
+    *,
+    import_batch_id: UUID,
+) -> dict[str, Any]:
+    # Re-verify the governed release before consuming the
+    # physical medications.csv artifact.
+    preflight = preflight_release(
+        settings,
+        descriptor,
+    )
+
+    dataset_release_id = preflight["release"][
+        "dataset_release_id"
+    ]
+
+    batch = _resolve_import_batch(
+        settings,
+        import_batch_id=import_batch_id,
+        dataset_release_id=dataset_release_id,
+    )
+
+    medication_source_file = (
+        _resolve_medication_source_file(
+            preflight
+        )
+    )
+
+    expected_medication_rows = (
+        medication_source_file["row_count"]
+    )
+
+    if expected_medication_rows is None:
+        raise RuntimeError(
+            "Registered medications.csv row count "
+            "is missing"
+        )
+
+    source_records = (
+        _load_medication_source_records(
+            settings,
+            import_batch_id=import_batch_id,
+            source_file_id=(
+                medication_source_file[
+                    "source_file_id"
+                ]
+            ),
+        )
+    )
+
+    if (
+        len(source_records)
+        != expected_medication_rows
+    ):
+        raise RuntimeError(
+            "Medication source-record count does not "
+            "match verified medications.csv row count: "
+            f"source_records={len(source_records)}, "
+            f"verified_rows={expected_medication_rows}"
+        )
+
+    promotion = _begin_medication_promotion(
+        settings,
+        import_batch_id=import_batch_id,
+    )
+
+    promotion_run_id = promotion[
+        "canonical_promotion_run_id"
+    ]
+
+    records_seen = 0
+    records_created = 0
+    records_existing = 0
+
+    lineage_edges_created = 0
+
+    medications_with_end_at = 0
+    medications_without_end_at = 0
+
+    medication_file_path = (
+        preflight["raw_directory"]
+        / MEDICATION_SOURCE_PATH
+    )
+
+    try:
+        with (
+            open_connection(settings) as conn,
+            conn.cursor() as cursor,
+            medication_file_path.open(
+                "r",
+                encoding="utf-8-sig",
+                newline="",
+            ) as handle,
+        ):
+            _set_environment(cursor, settings)
+
+            reader = csv.DictReader(handle)
+
+            if reader.fieldnames is None:
+                raise RuntimeError(
+                    "medications.csv has no header"
+                )
+
+            for row_number, row in enumerate(
+                reader,
+                start=1,
+            ):
+                source_record = (
+                    source_records.get(
+                        row_number
+                    )
+                )
+
+                if source_record is None:
+                    raise RuntimeError(
+                        "Verified medications.csv row "
+                        "has no matching governed "
+                        "source record: "
+                        f"row={row_number}"
+                    )
+
+                payload_sha256 = (
+                    _verified_medication_payload_sha256(
+                        row=row,
+                        source_record=source_record,
+                        row_number=row_number,
+                    )
+                )
+
+                medication = (
+                    map_synthea_medication(row)
+                )
+
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM ingest.promote_synthea_medication_v1(
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
+                    );
+                    """,
+                    (
+                        promotion_run_id,
+                        source_record[
+                            "source_record_id"
+                        ],
+                        payload_sha256,
+                        medication.
+                        synthea_patient_id,
+                        medication.
+                        synthea_encounter_id,
+                        medication.start_at,
+                        medication.end_at,
+                        medication.code,
+                        medication.display,
+                    ),
+                )
+
+                result = cursor.fetchone()
+
+                if result is None:
+                    raise RuntimeError(
+                        "Controlled Medication "
+                        "promotion returned no result"
+                    )
+
+                records_seen += 1
+
+                if result["medication_created"]:
+                    records_created += 1
+                else:
+                    records_existing += 1
+
+                lineage_edges_created += result[
+                    "lineage_edges_created"
+                ]
+
+                if medication.end_at is None:
+                    medications_without_end_at += 1
+                else:
+                    medications_with_end_at += 1
+
+            if (
+                records_seen
+                != expected_medication_rows
+            ):
+                raise RuntimeError(
+                    "Canonical Medication row count "
+                    "does not match medications.csv: "
+                    f"expected="
+                    f"{expected_medication_rows}, "
+                    f"actual={records_seen}"
+                )
+
+            if (
+                records_created
+                + records_existing
+                != records_seen
+            ):
+                raise RuntimeError(
+                    "Medication promotion counters "
+                    "do not reconcile"
+                )
+
+            if (
+                medications_with_end_at
+                + medications_without_end_at
+                != records_seen
+            ):
+                raise RuntimeError(
+                    "Medication temporal counters "
+                    "do not reconcile"
+                )
+
+            metrics = {
+                "mapping_name":
+                    MEDICATION_MAPPING_NAME,
+
+                "mapping_version":
+                    MEDICATION_MAPPING_VERSION,
+
+                "source_artifact":
+                    MEDICATION_SOURCE_PATH,
+
+                "dataset_release_id":
+                    str(dataset_release_id),
+
+                "lineage_edges_created":
+                    lineage_edges_created,
+
+                "medications_with_end_at":
+                    medications_with_end_at,
+
+                "medications_without_end_at":
+                    medications_without_end_at,
+
+                "patient_dependency_certification_required":
+                    True,
+
+                "encounter_dependency_certification_required":
+                    True,
+
+                "patient_encounter_match_required":
+                    True,
+
+                "source_temporal_precision":
+                    "timestamp_with_timezone",
+
+                "code_system_mapped":
+                    False,
+
+                "status_mapped":
+                    False,
+
+                "dose_text_mapped":
+                    False,
+
+                "payer_mapped":
+                    False,
+
+                "financial_fields_mapped":
+                    False,
+
+                "reason_fields_mapped":
+                    False,
+
+                "external_medication_identifier":
+                    False,
+
+                "source_identity":
+                    "governed_source_record_id",
+
+                "raw_identifier_values_logged":
+                    False,
+            }
+
+            cursor.execute(
+                """
+                SELECT ingest.complete_canonical_promotion(
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    0,
+                    0,
+                    %s
+                ) AS canonical_promotion_run_id;
+                """,
+                (
+                    promotion_run_id,
+                    records_seen,
+                    records_created,
+                    records_existing,
+                    Jsonb(metrics),
+                ),
+            )
+
+            completed = cursor.fetchone()
+
+            if completed is None:
+                raise RuntimeError(
+                    "Medication promotion completion "
+                    "returned no result"
+                )
+
+            completed_event_id = (
+                _write_system_event(
+                    cursor,
+                    event_type=(
+                        "canonical."
+                        "medication_promotion_completed"
+                    ),
+                    outcome="success",
+                    message=(
+                        "Janus Synthea Medication "
+                        "canonical promotion completed"
+                    ),
+                    metadata={
+                        "canonical_promotion_run_id":
+                            str(promotion_run_id),
+
+                        "import_batch_id":
+                            str(import_batch_id),
+
+                        "records_seen":
+                            records_seen,
+
+                        "records_created":
+                            records_created,
+
+                        "records_existing":
+                            records_existing,
+
+                        "lineage_edges_created":
+                            lineage_edges_created,
+
+                        "medications_with_end_at":
+                            medications_with_end_at,
+
+                        "medications_without_end_at":
+                            medications_without_end_at,
+                    },
+                )
+            )
+
+        return {
+            "canonical_promotion_run_id":
+                promotion_run_id,
+
+            "import_batch_id":
+                import_batch_id,
+
+            "dataset_release_id":
+                dataset_release_id,
+
+            "release_label":
+                preflight["release"][
+                    "release_label"
+                ],
+
+            "mapping_name":
+                MEDICATION_MAPPING_NAME,
+
+            "mapping_version":
+                MEDICATION_MAPPING_VERSION,
+
+            "records_seen":
+                records_seen,
+
+            "records_created":
+                records_created,
+
+            "records_existing":
+                records_existing,
+
+            "records_failed":
+                0,
+
+            "lineage_edges_created":
+                lineage_edges_created,
+
+            "medications_with_end_at":
+                medications_with_end_at,
+
+            "medications_without_end_at":
+                medications_without_end_at,
+
+            "started_system_event_id":
+                promotion["system_event_id"],
+
+            "completed_system_event_id":
+                completed_event_id,
+
+            "import_correlation_id":
+                batch["correlation_id"],
+        }
+
+    except Exception as error:
+        try:
+            _fail_medication_promotion(
                 settings,
                 canonical_promotion_run_id=(
                     promotion_run_id

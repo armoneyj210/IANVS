@@ -12,6 +12,7 @@ from janus_canonical.db import health_check
 from janus_canonical.promotion_runtime import (
     promote_conditions,
     promote_encounters,
+    promote_medications,
     promote_patients,
     promote_providers,
 )
@@ -132,7 +133,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=UUID,
         help="Completed governed import batch UUID",
     )
+    medication_parser = subparsers.add_parser(
+        "promote-medications",
+        help=(
+            "Promote quality-certified Synthea "
+            "medications into canonical clinical state"
+        ),
+    )
 
+    medication_parser.add_argument(
+        "descriptor",
+        type=Path,
+        help=(
+            "Path to Janus governed dataset "
+            "descriptor JSON"
+        ),
+    )
+
+    medication_parser.add_argument(
+        "--batch",
+        required=True,
+        type=UUID,
+        help="Completed governed import batch UUID",
+    )
     return parser
 
 
@@ -466,6 +489,78 @@ def run_promote_conditions(
         f"{result['completed_system_event_id']}"
     )
 
+def run_promote_medications(
+    descriptor_path: Path,
+    import_batch_id: UUID,
+) -> None:
+    settings = get_settings()
+
+    descriptor = load_dataset_descriptor(
+        descriptor_path
+    )
+
+    print("JANUS CANONICAL MEDICATION PROMOTION")
+    print("------------------------------------")
+    print(
+        f"Environment:  {settings.janus_env}"
+    )
+    print(
+        f"Release:      "
+        f"{descriptor.release.release_label}"
+    )
+    print(
+        f"Import Batch: {import_batch_id}"
+    )
+    print()
+
+    result = promote_medications(
+        settings,
+        descriptor,
+        import_batch_id=import_batch_id,
+    )
+
+    print("Canonical Medication promotion completed.")
+    print(
+        f"Promotion Run:         "
+        f"{result['canonical_promotion_run_id']}"
+    )
+    print(
+        f"Mapping:               "
+        f"{result['mapping_name']} "
+        f"v{result['mapping_version']}"
+    )
+    print(
+        f"Records Seen:          "
+        f"{result['records_seen']}"
+    )
+    print(
+        f"Medications Created:   "
+        f"{result['records_created']}"
+    )
+    print(
+        f"Medications Existing:  "
+        f"{result['records_existing']}"
+    )
+    print(
+        f"Records Failed:        "
+        f"{result['records_failed']}"
+    )
+    print(
+        f"With End Timestamp:    "
+        f"{result['medications_with_end_at']}"
+    )
+    print(
+        f"Without End Timestamp: "
+        f"{result['medications_without_end_at']}"
+    )
+    print(
+        f"Lineage Edges:         "
+        f"{result['lineage_edges_created']}"
+    )
+    print(
+        f"Completed Event:       "
+        f"{result['completed_system_event_id']}"
+    )
 def main(
     argv: Sequence[str] | None = None,
 ) -> None:
@@ -503,7 +598,12 @@ def main(
             args.batch,
         )
         return
-
+    if args.command == "promote-medications":
+        run_promote_medications(
+            args.descriptor,
+            args.batch,
+        )
+        return
     parser.error(
         f"Unsupported command: {args.command}"
     )
