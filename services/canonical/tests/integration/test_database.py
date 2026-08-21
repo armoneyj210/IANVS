@@ -109,6 +109,12 @@ def test_canonical_permission_boundary() -> None:
                     'EXECUTE'
                 ) AS patient_execute,
 
+                has_function_privilege(
+                    current_user,
+                    'ingest.promote_synthea_condition_v1(uuid,uuid,text,text,text,date,date,text,text,text)',
+                    'EXECUTE'
+                ) AS condition_execute,
+
                 has_schema_privilege(
                     current_user,
                     'clinical',
@@ -147,6 +153,7 @@ def test_canonical_permission_boundary() -> None:
 
     assert permissions["begin_execute"] is True
     assert permissions["patient_execute"] is True
+    assert permissions["condition_execute"] is True
 
     assert permissions["clinical_usage"] is False
 
@@ -252,6 +259,47 @@ def test_patient_writer_rejects_unknown_run() -> None:
 
         conn.rollback()
 
+def test_condition_writer_rejects_unknown_run() -> None:
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    with open_connection(settings) as conn:
+        with (
+            pytest.raises(
+                RaiseException,
+                match=(
+                    "Unknown canonical "
+                    "promotion run"
+                ),
+            ),
+            conn.cursor() as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT *
+                FROM ingest.promote_synthea_condition_v1(
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    '2026-01-15',
+                    NULL,
+                    'http://snomed.info/sct',
+                    '123456',
+                    'Test condition'
+                );
+                """,
+                (
+                    uuid4(),
+                    uuid4(),
+                    "0" * 64,
+                    str(uuid4()),
+                    str(uuid4()),
+                ),
+            )
+
+        conn.rollback()
 
 @pytest.mark.skipif(
     not APPROVED_RELEASE_LABEL,
