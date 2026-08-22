@@ -749,3 +749,304 @@ def test_condition_quality_does_not_trust_boolean_alone() -> None:
     )
 
     assert result.outcome == "fail"
+
+def _passing_medication_evidence() -> dict:
+    return {
+        "canonical_promotion_run_id":
+            uuid4(),
+        "import_batch_id":
+            uuid4(),
+        "mapping_name":
+            "synthea-medication",
+        "mapping_version":
+            "1",
+
+        "promotion_records_seen":
+            5615,
+        "promotion_records_created":
+            5615,
+        "promotion_records_existing":
+            0,
+        "promotion_records_failed":
+            0,
+
+        "expected_medication_sources":
+            5615,
+
+        "valid_medication_lineage_edges":
+            5615,
+        "medication_lineage_sources":
+            5615,
+        "medication_lineage_targets":
+            5615,
+
+        "medication_sources_missing_lineage":
+            0,
+        "medication_sources_with_multiple_targets":
+            0,
+        "medication_targets_with_multiple_sources":
+            0,
+
+        "medication_orphan_targets":
+            0,
+
+        "medications_without_valid_patient":
+            0,
+        "medications_without_valid_encounter":
+            0,
+        "patient_encounter_mismatches":
+            0,
+
+        "medications_missing_code":
+            0,
+        "medications_missing_display":
+            0,
+        "medications_missing_start_at":
+            0,
+
+        "medication_temporal_violations":
+            0,
+        "temporal_column_contract_mismatch":
+            0,
+
+        "medications_with_unexpected_code_system":
+            0,
+        "medications_with_unexpected_status":
+            0,
+        "medications_with_unexpected_dose_text":
+            0,
+
+        "uncertified_patient_dependencies":
+            0,
+        "uncertified_encounter_dependencies":
+            0,
+
+        "wrong_source_artifact_edges":
+            0,
+        "wrong_mapping_version_edges":
+            0,
+        "wrong_transformation_edges":
+            0,
+        "unexpected_target_edges":
+            0,
+
+        "promotion_counter_mismatch":
+            0,
+        "medication_target_count_mismatch":
+            0,
+
+        "violation_count":
+            0,
+        "lineage_complete":
+            True,
+    }
+
+
+def test_complete_medication_lineage_passes() -> None:
+    evidence = _passing_medication_evidence()
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "pass"
+    assert result.records_evaluated == 1
+    assert result.records_passed == 1
+    assert result.records_failed == 0
+
+
+def test_missing_medication_lineage_fails() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "medication_sources_missing_lineage"
+    ] = 1
+
+    evidence[
+        "valid_medication_lineage_edges"
+    ] = 5614
+
+    evidence[
+        "medication_lineage_sources"
+    ] = 5614
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+    assert result.records_failed == 1
+
+
+def test_medication_patient_encounter_mismatch_fails() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "patient_encounter_mismatches"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_uncertified_medication_patient_dependency_fails() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "uncertified_patient_dependencies"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_uncertified_medication_encounter_dependency_fails() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "uncertified_encounter_dependencies"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_medication_temporal_schema_contract_failure_fails() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "temporal_column_contract_mismatch"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_medication_temporal_value_violation_fails() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "medication_temporal_violations"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_medication_missing_start_at_fails() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "medications_missing_start_at"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_medication_unexpected_code_system_fails() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "medications_with_unexpected_code_system"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_medication_unexpected_status_fails() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "medications_with_unexpected_status"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_medication_unexpected_dose_text_fails() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "medications_with_unexpected_dose_text"
+    ] = 1
+
+    evidence["violation_count"] = 1
+    evidence["lineage_complete"] = False
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"
+
+
+def test_medication_quality_does_not_trust_boolean_alone() -> None:
+    evidence = _passing_medication_evidence()
+
+    evidence[
+        "wrong_transformation_edges"
+    ] = 1
+
+    # Deliberately simulate inconsistent aggregate evidence.
+    evidence["violation_count"] = 0
+    evidence["lineage_complete"] = True
+
+    result = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert result.outcome == "fail"

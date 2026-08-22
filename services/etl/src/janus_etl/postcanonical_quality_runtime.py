@@ -295,6 +295,37 @@ def _load_condition_lineage_evidence(
 
     return evidence
 
+def _load_medication_lineage_evidence(
+    settings: QualitySettings,
+    *,
+    canonical_promotion_run_id: UUID,
+) -> dict[str, Any]:
+    with (
+        open_connection(settings) as conn,
+        conn.cursor() as cursor,
+    ):
+        _set_environment(cursor, settings)
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM ingest.evaluate_medication_canonical_lineage(
+                %s
+            );
+            """,
+            (canonical_promotion_run_id,),
+        )
+
+        evidence = cursor.fetchone()
+
+    if evidence is None:
+        raise RuntimeError(
+            "Medication canonical lineage evaluator "
+            "returned no evidence"
+        )
+
+    return evidence
+
 def _load_lineage_evidence(
     settings: QualitySettings,
     *,
@@ -353,7 +384,16 @@ def _load_lineage_evidence(
                 canonical_promotion_run_id
             ),
         )
-
+    if (
+        mapping_name == "synthea-medication"
+        and mapping_version == "1"
+    ):
+        return _load_medication_lineage_evidence(
+            settings,
+            canonical_promotion_run_id=(
+                canonical_promotion_run_id
+            ),
+        )
     raise RuntimeError(
         "Unsupported canonical mapping for "
         "JANUS-DQ-006: "
@@ -927,6 +967,181 @@ def _evaluate_condition_lineage_evidence(
         details=details,
     )
 
+def _evaluate_medication_lineage_evidence(
+    evidence: dict[str, Any],
+) -> LineageEvaluation:
+    expected_medication_sources = evidence[
+        "expected_medication_sources"
+    ]
+
+    violation_fields = (
+        "medication_sources_missing_lineage",
+        "medication_sources_with_multiple_targets",
+        "medication_targets_with_multiple_sources",
+        "medication_orphan_targets",
+        "medications_without_valid_patient",
+        "medications_without_valid_encounter",
+        "patient_encounter_mismatches",
+        "medications_missing_code",
+        "medications_missing_display",
+        "medications_missing_start_at",
+        "medication_temporal_violations",
+        "temporal_column_contract_mismatch",
+        "medications_with_unexpected_code_system",
+        "medications_with_unexpected_status",
+        "medications_with_unexpected_dose_text",
+        "uncertified_patient_dependencies",
+        "uncertified_encounter_dependencies",
+        "wrong_source_artifact_edges",
+        "wrong_mapping_version_edges",
+        "wrong_transformation_edges",
+        "unexpected_target_edges",
+        "promotion_counter_mismatch",
+        "medication_target_count_mismatch",
+    )
+
+    no_violations = all(
+        evidence[field] == 0
+        for field in violation_fields
+    )
+
+    medication_coverage_complete = (
+        expected_medication_sources > 0
+        and evidence[
+            "promotion_records_seen"
+        ]
+        == expected_medication_sources
+        and evidence[
+            "promotion_records_failed"
+        ]
+        == 0
+        and evidence[
+            "valid_medication_lineage_edges"
+        ]
+        == expected_medication_sources
+        and evidence[
+            "medication_lineage_sources"
+        ]
+        == expected_medication_sources
+        and evidence[
+            "medication_lineage_targets"
+        ]
+        == expected_medication_sources
+    )
+
+    dependency_certification_complete = (
+        evidence[
+            "uncertified_patient_dependencies"
+        ]
+        == 0
+        and evidence[
+            "uncertified_encounter_dependencies"
+        ]
+        == 0
+    )
+
+    patient_encounter_consistent = (
+        evidence[
+            "patient_encounter_mismatches"
+        ]
+        == 0
+        and evidence[
+            "medications_without_valid_patient"
+        ]
+        == 0
+        and evidence[
+            "medications_without_valid_encounter"
+        ]
+        == 0
+    )
+
+    clinical_contract_complete = (
+        evidence[
+            "medications_missing_code"
+        ]
+        == 0
+        and evidence[
+            "medications_missing_display"
+        ]
+        == 0
+        and evidence[
+            "medications_missing_start_at"
+        ]
+        == 0
+        and evidence[
+            "medication_temporal_violations"
+        ]
+        == 0
+        and evidence[
+            "temporal_column_contract_mismatch"
+        ]
+        == 0
+        and evidence[
+            "medications_with_unexpected_code_system"
+        ]
+        == 0
+        and evidence[
+            "medications_with_unexpected_status"
+        ]
+        == 0
+        and evidence[
+            "medications_with_unexpected_dose_text"
+        ]
+        == 0
+    )
+
+    aggregate_contract_consistent = (
+        evidence["violation_count"] == 0
+        and evidence["lineage_complete"] is True
+    )
+
+    passed = (
+        no_violations
+        and medication_coverage_complete
+        and dependency_certification_complete
+        and patient_encounter_consistent
+        and clinical_contract_complete
+        and aggregate_contract_consistent
+    )
+
+    details = {
+        "requirement":
+            "100_percent_canonical_lineage",
+        "mapping_name":
+            evidence["mapping_name"],
+        "mapping_version":
+            evidence["mapping_version"],
+        "evidence":
+            _json_safe_evidence(evidence),
+        "quality_interpretation": {
+            "no_violations":
+                no_violations,
+            "medication_coverage_complete":
+                medication_coverage_complete,
+            "dependency_certification_complete":
+                dependency_certification_complete,
+            "patient_encounter_consistent":
+                patient_encounter_consistent,
+            "clinical_contract_complete":
+                clinical_contract_complete,
+            "aggregate_contract_consistent":
+                aggregate_contract_consistent,
+        },
+    }
+
+    return LineageEvaluation(
+        outcome="pass" if passed else "fail",
+        records_evaluated=1,
+        records_passed=1 if passed else 0,
+        records_failed=0 if passed else 1,
+        score=(
+            Decimal("1.000000")
+            if passed
+            else Decimal("0.000000")
+        ),
+        details=details,
+    )
+
 def _evaluate_lineage_evidence(
     evidence: dict[str, Any],
 ) -> LineageEvaluation:
@@ -966,7 +1181,14 @@ def _evaluate_lineage_evidence(
         return _evaluate_condition_lineage_evidence(
             evidence
         )
-
+    if (
+        mapping_name == "synthea-medication"
+        and mapping_version == "1"
+    ):
+        return _evaluate_medication_lineage_evidence(
+            evidence
+        )
+    
     raise RuntimeError(
         "Unsupported canonical mapping for "
         "JANUS-DQ-006 evaluation: "

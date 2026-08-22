@@ -33,6 +33,9 @@ ENCOUNTER_PROMOTION_RUN_ID = os.getenv(
 CONDITION_PROMOTION_RUN_ID = os.getenv(
     "JANUS_TEST_CONDITION_PROMOTION_RUN_ID"
 )
+MEDICATION_PROMOTION_RUN_ID = os.getenv(
+    "JANUS_TEST_MEDICATION_PROMOTION_RUN_ID"
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -113,6 +116,12 @@ def test_postcanonical_quality_permissions() -> None:
                     'EXECUTE'
                 ) AS condition_evidence_execute,
 
+                has_function_privilege( 
+                    current_user,
+                    'ingest.evaluate_medication_canonical_lineage(uuid)',
+                    'EXECUTE'
+                ) AS medication_evidence_execute,
+
                 has_function_privilege(
                     current_user,
                     'ingest.write_postcanonical_lineage_decision(uuid,text,text)',
@@ -153,6 +162,13 @@ def test_postcanonical_quality_permissions() -> None:
     assert (
         permissions[
             "condition_evidence_execute"
+        ]
+        is True
+    )
+
+    assert (
+        permissions[
+            "medication_evidence_execute"
         ]
         is True
     )
@@ -567,6 +583,233 @@ def test_condition_promotion_passes_dq006_evidence() -> None:
     assert (
         evidence[
             "uncertified_encounter_dependencies"
+        ]
+        == 0
+    )
+
+    assert evidence["violation_count"] == 0
+    assert evidence["lineage_complete"] is True
+
+    assert evaluation.outcome == "pass"
+
+@pytest.mark.skipif(
+    not MEDICATION_PROMOTION_RUN_ID,
+    reason=(
+        "Set JANUS_TEST_MEDICATION_PROMOTION_RUN_ID "
+        "to test Medication DQ-006 evidence"
+    ),
+)
+def test_medication_promotion_passes_dq006_evidence() -> None:
+    get_quality_settings.cache_clear()
+    settings = get_quality_settings()
+
+    promotion_run_id = UUID(
+        MEDICATION_PROMOTION_RUN_ID
+    )
+
+    evidence = _load_lineage_evidence(
+        settings,
+        canonical_promotion_run_id=(
+            promotion_run_id
+        ),
+    )
+
+    evaluation = _evaluate_lineage_evidence(
+        evidence
+    )
+
+    assert (
+        evidence["mapping_name"]
+        == "synthea-medication"
+    )
+
+    assert evidence["mapping_version"] == "1"
+
+    assert (
+        evidence[
+            "expected_medication_sources"
+        ]
+        == 5615
+    )
+
+    assert (
+        evidence[
+            "valid_medication_lineage_edges"
+        ]
+        == 5615
+    )
+
+    assert (
+        evidence[
+            "medication_lineage_sources"
+        ]
+        == 5615
+    )
+
+    assert (
+        evidence[
+            "medication_lineage_targets"
+        ]
+        == 5615
+    )
+
+    assert (
+        evidence[
+            "medication_sources_missing_lineage"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medication_sources_with_multiple_targets"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medication_targets_with_multiple_sources"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medication_orphan_targets"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medications_without_valid_patient"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medications_without_valid_encounter"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "patient_encounter_mismatches"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medications_missing_code"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medications_missing_display"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medications_missing_start_at"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medication_temporal_violations"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "temporal_column_contract_mismatch"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medications_with_unexpected_code_system"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medications_with_unexpected_status"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medications_with_unexpected_dose_text"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "uncertified_patient_dependencies"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "uncertified_encounter_dependencies"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "wrong_source_artifact_edges"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "wrong_mapping_version_edges"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "wrong_transformation_edges"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "unexpected_target_edges"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "promotion_counter_mismatch"
+        ]
+        == 0
+    )
+
+    assert (
+        evidence[
+            "medication_target_count_mismatch"
         ]
         == 0
     )
